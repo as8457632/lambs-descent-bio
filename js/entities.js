@@ -215,6 +215,14 @@ function weaponRange(p) {
     default: return p.tearSpeed * p.tearLife;
   }
 }
+function autoTarget(room, p) { // v5.0 自动炮塔：射程内最近「看得见」的敌人
+  const cand = [];
+  for (const e of room.enemies) if (!e.dead && e.spawnT <= 0) cand.push(e);
+  if (room.boss && !room.boss.dead) cand.push(room.boss);
+  cand.sort((a, b) => dist2(p.x, p.y, a.x, a.y) - dist2(p.x, p.y, b.x, b.y));
+  for (const c of cand) if (dist2(p.x, p.y, c.x, c.y) <= weaponRange(p) + c.r && hasLos(room, p.x, p.y, c.x, c.y)) return c;
+  return null;
+}
 function nearestEnemy(room, x, y) {
   let best = null, bd = 1e9;
   for (const e of room.enemies) { if (e.dead) continue; const d = dist2(x, y, e.x, e.y); if (d < bd) { bd = d; best = e; } }
@@ -402,11 +410,12 @@ class Player {
         { life: 200, bulletKey: 'grenade', spId: 'mortar', fuseT: Math.max(8, Math.ceil(d / sp)), blast: 92 }));
       sk.cd = sk.cdMax; SFX.play('shoot');
     } else if (sk.id === 'zap') {
-      const foes = room.enemies.filter(e => !e.dead && e.spawnT <= 0).slice(0, 14);
+      const foes = room.enemies.filter(e => !e.dead && e.spawnT <= 0)
+        .sort((a, b) => dist2(this.x, this.y, a.x, a.y) - dist2(this.x, this.y, b.x, b.y)).slice(0, 14); // 最近 14，不是数组前 14
       const hasBoss = room.boss && !room.boss.dead;
       if (!foes.length && !hasBoss) return; // 无目标不空放，不扣冷却
-      const dmg = this.dmg * 1.6;
-      for (const e of foes) { e.hit(dmg, room, e.x, e.y); e.stun = 90; } // 麻痹 1.5s：清屏后留输出窗口
+      const dmg = this.dmg * 1.2;
+      for (const e of foes) { e.hit(dmg, room, e.x, e.y); e.stun = 75; } // 麻痹 1.25s：清屏后留输出窗口
       if (hasBoss) room.boss.hit(dmg);
       game.fx.push({ type: 'bolt', pts: [{ x: this.x, y: this.y }].concat(foes.map(e => ({ x: e.x, y: e.y }))), lvl: 3, t: 12, t0: 12 });
       sk.cd = sk.cdMax; SFX.play('zap'); shake(6);
@@ -481,7 +490,7 @@ class Player {
     // 射击：BIO 自动索敌（射程内最近敌人自动开火，玩家只管走位）；桌面手动瞄准
     let ax, ay;
     if (BIO) {
-      const tgt = nearestEnemy(room, this.x, this.y);
+      const tgt = autoTarget(room, this); // 视线过滤：不再隔岩开火
       if (tgt) {
         const d = Math.max(1, dist2(this.x, this.y, tgt.x, tgt.y));
         if (d <= weaponRange(this)) { ax = (tgt.x - this.x) / d; ay = (tgt.y - this.y) / d; }
@@ -982,11 +991,12 @@ class Pickup {
     // 商店货：先付钱后拾取
     if (this.price > 0) {
       if (d < this.r + p.r * .7) {
-        if (p.coins >= this.price) {
-          p.coins -= this.price; this.price = 0;
+        const purse = BIO ? (game.runCoins || 0) : p.coins; // 搜打撤：商店花随身金币，死了不双亏
+        if (purse >= this.price) {
+          if (BIO) game.runCoins -= this.price; else p.coins -= this.price; this.price = 0;
           SFX.play('coin');
           spawnParticles(room, this.x, this.y, 6, '#e8c85e', 2);
-        } else if (this.denyCd <= 0) { SFX.play('deny'); this.denyCd = 45; game.hint = { text: `金币不足（需 ${this.price} 枚）`, t: 80 }; }
+        } else if (this.denyCd <= 0) { SFX.play('deny'); this.denyCd = 45; game.hint = { text: BIO ? `随身金币不足（需 ${this.price} 枚，击杀怪物掉落）` : `金币不足（需 ${this.price} 枚）`, t: 80 }; }
       }
       return;
     }

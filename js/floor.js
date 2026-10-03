@@ -8,7 +8,7 @@ class Room {
     this.gx = gx; this.gy = gy; this.id = gx + ',' + gy;
     this.type = type; // start | normal | treasure | boss
     this.links = { n: null, e: null, s: null, w: null };
-    this.cleared = (type === 'start' || type === 'treasure');
+    this.cleared = (type === 'start' || type === 'treasure' || type === 'shop'); // 商店无怪：不预清会永久锁门（软锁 bug）
     this.visited = false;
     this.generated = false;
     this.hasEnemiesPlanned = false;
@@ -245,8 +245,8 @@ function createRoomContents(room, floorNum, entryX, entryY) {
 
   // v4.0 撤离点：桌面每层起点房都有；v5.0 搜打撤：起点房不许白嫖，每 3 间实验室布一个撤离点
   if (BIO) {
-    if (room.type === 'normal' && (room.dist + 1) % 3 === 0)
-      room.pickups.push(new Pickup('extract', WORLD_W - 84, WORLD_H - 96));
+    if ((room.dist + 1) % 3 === 0 && room.type !== 'start' && room.type !== 'boss') // 3、6 号房各一个撤离点（含商店房）；左下布点避开冲刺按钮
+      room.pickups.push(new Pickup('extract', 84, WORLD_H - 120));
     if (room.type === 'normal' && Math.random() < .22) // 被困幸存者：救出结算 +100/人
       room.pickups.push(new Pickup('save', rand(TILE * 2, WORLD_W - TILE * 2), rand(TILE * 2, WORLD_H - TILE * 2)));
   } else if (room.type === 'start')

@@ -77,7 +77,7 @@ function modWorldTick(p) {
   game.lavaT = ((game.time || 0) % 240);
   if (game.mod === 'lava' && game.lavaT < 90) {
     if (p.moving) p.stillT = 0; else p.stillT = (p.stillT || 0) + 1;
-    if (p.stillT === 25) { p.stillT = 0; p.hurt(1, game, undefined, undefined, '熔岩脉冲'); }
+    if (p.stillT === (BIO ? 40 : 25)) { p.stillT = 0; p.hurt(1, game, undefined, undefined, '熔岩脉冲'); } // 竖屏自动战斗站桩是常态，阈值放宽
   } else if (p.stillT) p.stillT = 0;
 }
 
@@ -94,7 +94,7 @@ function modRoomTint(ctx, room, pal) { // 地面氛围：冰面反光 / 熔岩�
 }
 
 function modVignetteRange() { // dark 战区：光圈收缩（返回 [内半径系数, 外半径系数]）
-  return game.mod === 'dark' ? [.16, .34] : [.35, .62];
+  return game.mod === 'dark' ? (BIO ? [.24, .44] : [.16, .34]) : [.35, .62]; // 单屏战场光圈别压成隧道
 }
 
 function modHudTag(ctx) { // 视口左上角战区规则徽标 + 风向罗盘

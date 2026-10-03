@@ -576,9 +576,10 @@ function drawHUD(ctx, g) {
   }
 
   // 金币 / 冲刺CD（贴 HUD 底缘，与两行心形错开；v4.3-F3：冲刺槽位随金币位数让位）
-  const res = [['coin', p.coins]];
+  const coinN = BIO ? (game.runCoins || 0) : p.coins; // 搜打撤：HUD 显示随身金币（账户另在标题/工坊）
+  const res = [['coin', coinN]];
   ctx.font = 'bold 13px monospace';
-  const coinW = 10 + ctx.measureText('×' + p.coins).width + 8;
+  const coinW = 10 + ctx.measureText('×' + coinN).width + 8;
   res.forEach(([kind, n], slot) => {
     const rx = 14 + slot * 40 + (BIO ? 118 : 0), ry = HUD_H - 8;
     drawResIcon(ctx, kind, rx, ry, g.time);
@@ -602,11 +603,18 @@ function drawHUD(ctx, g) {
     ctx.fillText(Touch.supported() ? '冲刺' : 'Space', rx + 13, ry + 4);
   }
 
-  // v5.0 竖屏：小地图常驻 HUD 左上（原侧栏/右上叠层形态在竖屏没有空间）
+  // v5.0 竖屏：小地图常驻 HUD 左上；幽暗区规则下地图失灵
   if (BIO) {
-    ctx.save(); ctx.translate(8, 8); ctx.scale(.62, .62);
-    ctx.fillStyle = 'rgba(10,7,5,.72)'; ctx.beginPath(); ctx.roundRect(-4, -6, 200, 46, 6); ctx.fill();
-    drawMinimapAt(ctx, g, 0, 0);
+    ctx.save(); ctx.translate(8, 8);
+    if (g.mod === 'dark') {
+      ctx.fillStyle = 'rgba(10,7,5,.8)'; ctx.beginPath(); ctx.roundRect(0, 0, 118, 40, 6); ctx.fill();
+      ctx.fillStyle = '#8a7360'; ctx.font = 'bold 11px monospace'; ctx.textAlign = 'center';
+      ctx.fillText('火把视野', 59, 17); ctx.fillText('地图失灵', 59, 32); ctx.textAlign = 'left';
+    } else {
+      ctx.scale(.62, .62);
+      ctx.fillStyle = 'rgba(10,7,5,.72)'; ctx.beginPath(); ctx.roundRect(-4, -6, 200, 46, 6); ctx.fill();
+      drawMinimapAt(ctx, g, 0, 0);
+    }
     ctx.restore();
   }
   // 层名横幅（渐变带 + 文字投影）
@@ -791,7 +799,7 @@ function armoryZones() {
   const cols = BIO ? 2 : 7, cw = BIO ? 246 : 116, ch = BIO ? 58 : 62, gap = 8;
   const x0 = (CANVAS_W - (cols * (cw + gap) - gap)) / 2, y0 = BIO ? 130 : 96;
   const cells = ids.map((id, i) => ({ id, x: x0 + (i % cols) * (cw + gap), y: y0 + Math.floor(i / cols) * (ch + gap), w: cw, h: ch }));
-  const by = BIO ? 570 : 258;
+  const by = BIO ? 610 : 258;
   return {
     cells,
     single: BIO ? { x: CANVAS_W / 2 - 246, y: by, w: 240, h: 56 } : { x: CANVAS_W / 2 - 240, y: by, w: 226, h: 46 },

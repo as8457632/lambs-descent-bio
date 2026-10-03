@@ -228,9 +228,10 @@ const Touch = {
         if (Math.hypot(p.x - mbtn.x, p.y - mbtn.y) < mbtn.r + 8) { this.muteTap = true; continue; }
         if (game.state === 'play' && this.bagBtn && Math.hypot(p.x - this.bagBtn.x, p.y - this.bagBtn.y) < this.bagBtn.r + 8) { this.bagTap = true; continue; } // 背包
         let hitSkill = false;
-        if (game.state === 'play') for (let i = 0; i < this.skillBtns.length; i++) { // v5.0 主动技能
+        if (game.state === 'play') for (let i = 0; i < this.skillBtns.length; i++) { // v5.0 主动技能：未解锁的按钮不吞触点
           const sb = this.skillBtns[i];
-          if (Math.hypot(p.x - sb.x, p.y - sb.y) < sb.r + 8) { this.skillTap = i; hitSkill = true; break; }
+          if (game.player && game.player.skills[i] && game.player.skills[i].unlocked &&
+              Math.hypot(p.x - sb.x, p.y - sb.y) < sb.r + 8) { this.skillTap = i; hitSkill = true; break; }
         }
         if (hitSkill) continue;
         // 冲刺键：战斗中常驻（不再按余弹吞触点）；其他状态照常生成摇杆消除死区

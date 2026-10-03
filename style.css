@@ -56,7 +56,7 @@ body {
   #rotate { display: inline-block; }
 }
 @media (pointer: coarse) {
-  #fsbtn { display: inline-block; } /* 触屏设备横竖屏都给出全屏按钮，窗口偏小时一键放大 */
+  #fsbtn { display: none; } /* v5.0：改由 JS 按 fitScale 决定 .show 时机，竖屏原生不再常驻遮挡小地图 */
 }
 #fsbtn.show { display: inline-block !important; } /* JS 检测到窗口偏小自动亮起 */
 /* 全屏时：铺满、隐藏页面装饰 */
@@ -100,3 +100,7 @@ body.rot #fsbtn {
 }
 
 :fullscreen body.rot #fsbtn, :-webkit-full-screen body.rot #fsbtn { display: inline-block !important; } /* 全屏+强制横屏时保留退出入口 */
+
+/* v5.0 生化模式竖屏原生：横屏引导与页脚帮助全部退场，杜绝页面超高裁切 */
+body.bio #rotate, body.bio #help { display: none !important; }
+body.bio { overflow: hidden; }
