@@ -8,7 +8,8 @@ class Room {
     this.gx = gx; this.gy = gy; this.id = gx + ',' + gy;
     this.type = type; // start | normal | treasure | boss
     this.links = { n: null, e: null, s: null, w: null };
-    this.cleared = (type === 'start' || type === 'treasure' || type === 'shop'); // 商店无怪：不预清会永久锁门（软锁 bug）
+    this.cleared = (type === 'start' || type === 'treasure' || type === 'shop' || type === 'reward'); // 无怪房预清：不预清会永久锁门（软锁 bug）
+    this.doorCost = null; this.doorOpen = {}; // v5.1 奖励房金币门
     this.visited = false;
     this.generated = false;
     this.hasEnemiesPlanned = false;
@@ -31,7 +32,10 @@ class Room {
       if (this.cleared) {
         for (const d of DIRS) {
           const [dx, dy] = DOOR_CELL[d];
-          if (tx === dx && ty === dy && this.links[d]) return false; // 开门后可通行
+          if (tx === dx && ty === dy && this.links[d]) {
+            if (this.doorCost && this.doorCost[d] && !this.doorOpen[d]) return true; // 金币门未付：实心
+            return false; // 开门后可通行
+          }
         }
       }
       return true;
@@ -56,17 +60,28 @@ class Room {
 // 楼层布局：BIO=实验室1→7+BOSS 线性链；桌面=网格随机生长，BFS 距离最远的死路放 Boss 房
 function genFloor(n) {
   if (BIO) {
+    const diff = BIO_DIFFS[Meta.load().bioDiff || 0];
+    const len = 8 + diff.extra; // 实验室数随难度 8→13，BOSS 恒为最后一间
     const rooms = new Map();
     const chain = [];
-    for (let i = 0; i < 8; i++) {
-      const type = i === 0 ? 'start' : i === 7 ? 'boss' : i === 3 ? 'treasure' : i === 5 ? 'shop' : 'normal';
+    for (let i = 0; i < len; i++) {
+      const type = i === 0 ? 'start' : i === len - 1 ? 'boss' : i === 3 ? 'treasure' : i === 5 ? 'shop' : 'normal';
       const r = new Room(1 + i, 3, type);
       r.dist = i;
       rooms.set(r.id, r); chain.push(r);
     }
-    for (let i = 0; i < 7; i++) { chain[i].links.e = chain[i + 1].id; chain[i + 1].links.w = chain[i].id; }
+    for (let i = 0; i < len - 1; i++) { chain[i].links.e = chain[i + 1].id; chain[i + 1].links.w = chain[i].id; }
+    // 奖励房（文档：金币开门的可选侧房，跳过不阻塞主线）：每 3 间挂一间
+    chain.forEach((r, i) => {
+      if (i === 0 || i >= len - 1 || (i + 1) % 3 !== 0) return;
+      const rr = new Room(r.gx, 4, 'reward');
+      rr.dist = i; rr.cleared = true;
+      rooms.set(rr.id, rr);
+      r.links.s = rr.id; rr.links.n = r.id;
+      r.doorCost = { s: 30 + 20 * (i + 1) }; // 开门价随深度涨
+    });
     const distMap = {}; chain.forEach((r, i) => distMap[r.id] = i);
-    return { rooms, distMap, startId: chain[0].id, bossId: chain[7].id, n: 1, chain: true };
+    return { rooms, distMap, startId: chain[0].id, bossId: chain[len - 1].id, n: 1, chain: true };
   }
   const GW = 7, GH = 7;
   const rooms = new Map();
@@ -187,19 +202,19 @@ function createRoomContents(room, floorNum, entryX, entryY) {
     // 敌人
     const pools = [
       ['fly', 'fly', 'attackfly', 'gaper', 'gaper', 'spider', 'bat', 'hopper'],
-      ['fly', 'attackfly', 'attackfly', 'gaper', 'pooter', 'spider', 'hopper', 'splitter', 'turret', 'ghost', 'bone', 'eye', 'bat'],
-      ['attackfly', 'attackfly', 'gaper', 'gaper', 'pooter', 'spider', 'hopper', 'splitter', 'splitter', 'turret', 'ghost', 'spreader', 'bone', 'eye', 'mushroom'],
+      ['fly', 'attackfly', 'attackfly', 'gaper', 'pooter', 'spider', 'hopper', 'splitter', 'turret', 'ghost', 'bone', 'eye', 'bat', 'glasp'],
+      ['attackfly', 'attackfly', 'gaper', 'gaper', 'pooter', 'spider', 'hopper', 'splitter', 'splitter', 'turret', 'ghost', 'spreader', 'bone', 'eye', 'mushroom', 'glasp', 'glasp'],
     ];
     // 难度门控：远端房间用更强怪池；入口侧房间降血量，避免开局撞脸劝退
     const tier = clamp(floorNum - 1 + ((room.dist || 0) >= 3 ? 1 : 0), 0, 2);
-    const hpMul = 0.55 + 0.12 * clamp(room.dist || 0, 0, 4);
+    const hpMul = BIO ? 1 : 0.55 + 0.12 * clamp(room.dist || 0, 0, 4); // v5.1.1：BIO 血线只吃文档公式（statM），隐藏浅房减免退出
     // 配额制：3 屏大房间怪量翻倍；初始刷一批，波次补刷，杀满配额后残敌必须全清
-    room.quota = BIO ? Math.round((6 + 2 * (room.dist || 0)) * (1 + .10 * ((game.stage || 1) - 1))) // 生化模式：单屏房一屏僵尸，逐间递增
+    room.quota = BIO ? Math.round(8 * (1 + .3 * ((room.dist || 0) + 1)) * (1 + .10 * ((game.stage || 1) - 1))) // 文档公式：第 N 房敌人数 = 基础×(1+0.3N)
       : Math.round((12 + 7 * floorNum + Math.min(12, Math.floor(game.runTime / 3600) * 2)) * (0.55 + 0.15 * clamp(room.dist || 0, 0, 4)) * (1 + .10 * ((game.stage || 1) - 1)) * 10); // 用户实测反馈：怪量提 10 倍才够打
     room.killed = 0;
     room.spawnT = Math.max(50, 130 - 15 * floorNum);
     room.tier = tier; room.hpMul = hpMul;
-    const initial = BIO ? Math.min(room.quota, 4 + (room.dist || 0)) : Math.min(room.quota, (4 + 2 * floorNum + randi(0, 3)) * 5);
+    const initial = BIO ? Math.min(room.quota, 3 + Math.ceil(((room.dist || 0) + 1) * .8)) : Math.min(room.quota, (4 + 2 * floorNum + randi(0, 3)) * 5);
     for (let i = 0; i < initial; i++) {
       let x, y, tries = 0;
       do {
@@ -212,16 +227,22 @@ function createRoomContents(room, floorNum, entryX, entryY) {
         room.solidTile(Math.floor(x / TILE), Math.floor(y / TILE))));
       const e = new Enemy(choice(pools[tier]), x, y, floorNum);
       e.hp = e.maxHp = Math.max(2, Math.ceil(e.hp * hpMul));
+      if (BIO && game.diffMutate && Math.random() < .3) e.mut = Math.random() < .5 ? 'armored' : 'slowshot'; // N6+ 突变词缀
       room.enemies.push(e);
     }
     room.hasEnemiesPlanned = true;
   }
 
   if (room.type === 'treasure') {
-    const rp = makeRewardPickup(WORLD_W / 2, WORLD_H / 2, game.player);
-    if (rp.kind === 'item' && !rp.item)
-      for (let i = 0; i < 3; i++) room.pickups.push(new Pickup('coin', WORLD_W / 2 + rand(-30, 30), WORLD_H / 2 + rand(-20, 20)));
-    else room.pickups.push(rp);
+    if (BIO) { // v5.2 细则5：藏品室直出 1 张当前枪技能卡
+      const u = game.rollSkill();
+      room.pickups.push(u ? new Pickup('skill', WORLD_W / 2, WORLD_H / 2, { u }) : makeRewardPickup(WORLD_W / 2, WORLD_H / 2, game.player));
+    } else {
+      const rp = makeRewardPickup(WORLD_W / 2, WORLD_H / 2, game.player);
+      if (rp.kind === 'item' && !rp.item)
+        for (let i = 0; i < 3; i++) room.pickups.push(new Pickup('coin', WORLD_W / 2 + rand(-30, 30), WORLD_H / 2 + rand(-20, 20)));
+      else room.pickups.push(rp);
+    }
   }
 
   if (room.type === 'shop') {
@@ -233,20 +254,48 @@ function createRoomContents(room, floorNum, entryX, entryY) {
     } else {
       room.pickups.push(rp); room.shelf = (room.shelf || []).concat([rp]);
     }
-    const g2 = new Pickup(choice(['heart', 'coin']), WORLD_W / 2 - 130, WORLD_H / 2 - 26, null, 2);
-    const g3 = new Pickup(choice(['heart', 'coin']), WORLD_W / 2 + 130, WORLD_H / 2 - 26, null, 1);
+    if (BIO) { // 文档 7.1 波间消费：消耗品与临时强化（花随身金币）
+      const inj = new Pickup('item', WORLD_W / 2 - 130, WORLD_H / 2 + 40, { id: 'inject', name: '肾上腺针剂', desc: '立刻回复 40 生命', color: '#c4303a', apply(pp) { pp.heal(40); } }, 40);
+      const turbo = new Pickup('item', WORLD_W / 2 + 130, WORLD_H / 2 + 40, { id: 'turbo', name: '击发助器', desc: '本局攻速 +15%', color: '#e8a83a', apply(pp) { pp.fireDelay = Math.max(4, Math.round(pp.fireDelay * .85)); } }, 60);
+      room.pickups.push(inj, turbo); room.shelf = (room.shelf || []).concat([inj, turbo]);
+    }
+    const g2 = new Pickup(choice(['medkit', 'coin']), WORLD_W / 2 - 130, WORLD_H / 2 - 26, null, 8); // v5.2：货架心→药膏 8 币
+    const g3 = new Pickup(choice(['medkit', 'coin']), WORLD_W / 2 + 130, WORLD_H / 2 - 26, null, 5);
     room.pickups.push(g2, g3); room.shelf = (room.shelf || []).concat([g2, g3]);
   }
 
   if (room.type === 'boss') {
-    const cfg = BOSSES[Math.min(floorNum, BOSSES.length) - 1];
+    // v5.1.1：生化模式关底恒为杜尔加（the_maw：触手横扫/召唤/P2 狂暴）
+    const cfg = BIO ? (BOSSES.find(b => b.id === 'the_maw') || BOSSES[BOSSES.length - 1]) : BOSSES[Math.min(floorNum, BOSSES.length) - 1];
     room.boss = new Boss(cfg, WORLD_W / 2, WORLD_H * .42, floorNum);
+  }
+
+  if (BIO && room.type === 'reward') { // 奖励房：付币开门的富矿，2 宝箱（同初始箱规则）+ 物资堆，无怪
+    const c1 = new Pickup('chest', WORLD_W / 2 - 70, WORLD_H / 2); c1.bioInit = true;
+    const c2 = new Pickup('chest', WORLD_W / 2 + 70, WORLD_H / 2); c2.bioInit = true;
+    room.pickups.push(c1, c2);
+    for (let i = 0; i < 3; i++) room.pickups.push(new Pickup('loot', WORLD_W / 2 + rand(-40, 40), WORLD_H / 2 + rand(-70, -40), choice(LOOT)));
+    room.pickups.push(new Pickup('save', WORLD_W / 2, WORLD_H / 2 + 110)); // 奖励房必出幸存者
+  }
+
+  if (BIO && (room.type === 'normal' || room.type === 'boss' || room.type === 'start')) { // v5.1.1 细则1：进房即有初始宝箱（远离入口、避开怪与BOSS）
+    let bx = WORLD_W / 2, by = TILE * 3, bd = -1;
+    for (let i = 0; i < 60; i++) {
+      const x = rand(TILE * 2.2, WORLD_W - TILE * 2.2), y = rand(TILE * 2.2, WORLD_H - TILE * 2.2);
+      if (room.solidTile(Math.floor(x / TILE), Math.floor(y / TILE))) continue;
+      if (room.enemies.some(e => dist2(x, y, e.x, e.y) < 60)) continue;
+      if (room.boss && dist2(x, y, room.boss.x, room.boss.y) < 140) continue;
+      const d = dist2(x, y, entryX, entryY);
+      if (d < 130) continue;
+      if (d > bd) { bd = d; bx = x; by = y; }
+    }
+    const ch = new Pickup('chest', bx, by); ch.bioInit = true; room.pickups.push(ch);
   }
 
   // v4.0 撤离点：桌面每层起点房都有；v5.0 搜打撤：起点房不许白嫖，每 3 间实验室布一个撤离点
   if (BIO) {
-    if ((room.dist + 1) % 3 === 0 && room.type !== 'start' && room.type !== 'boss') // 3、6 号房各一个撤离点（含商店房）；左下布点避开冲刺按钮
-      room.pickups.push(new Pickup('extract', 84, WORLD_H - 120));
+    if ((room.dist + 1) % 3 === 0 && room.type !== 'start' && room.type !== 'boss' && room.type !== 'reward') // 3、6 号房各一个撤离点（含商店房）；左下布点避开冲刺按钮
+      room.pickups.push(new Pickup('extract', WORLD_W / 2, WORLD_H - 96)); // v5.2 复核P2：撤离坪移到底部中央，避开左下移动摇杆与背包按钮
     if (room.type === 'normal' && Math.random() < .22) // 被困幸存者：救出结算 +100/人
       room.pickups.push(new Pickup('save', rand(TILE * 2, WORLD_W - TILE * 2), rand(TILE * 2, WORLD_H - TILE * 2)));
   } else if (room.type === 'start')
@@ -258,12 +307,8 @@ function rollClearReward(room, floorNum) {
   const cx = WORLD_W / 2, cy = WORLD_H / 2;
   room.pickups.push(new Pickup('coin', cx + rand(-60, 60), cy + rand(-40, 40)));
   room.pickups.push(new Pickup('coin', cx + rand(-60, 60), cy + rand(-40, 40))); // 保底2币
-  if (Math.random() < .35) {
-    const wid = pickWeaponId(game.player);
-    if (wid) room.pickups.push(new Pickup('weapon', cx + rand(-80, 80), cy + rand(-50, 50), null, 0, wid));
-  }
   if (Math.random() > .55) {
-    const kind = choice(['coin', 'heart', 'halfheart', 'halfheart']);
+    const kind = Math.random() < .2 ? 'medkit' : 'coin'; // v5.2：清房补给=金币为主，20% 药膏
     room.pickups.push(new Pickup(kind, cx + rand(-90, 90), cy + rand(-50, 50)));
   }
 }

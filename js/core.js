@@ -13,6 +13,13 @@ const CANVAS_W = ROOM_W + PANEL_W;
 const CANVAS_H = ROOM_H + HUD_H;
 let VIEW_W = ROOM_W; // 当前视口宽：桌面 720，触屏隐藏侧栏后吃满 960；BIO 恒 528
 let IS_MOBILE = false; // 粗指针+触控 → 手机布局（隐藏侧栏/叠层小地图/大按钮）
+// v5.1 生化模式难度分级（文档 6.2）：血量/攻击倍率、额外房间、金币获取、突变词缀
+const BIO_DIFFS = [
+  { id: 'N1', name: '普通', hp: 1,   atk: 1,   extra: 0, coin: 1,  mutate: false, c: '#7fae5a' },
+  { id: 'N4', name: '困难', hp: 1.8, atk: 1.5, extra: 2, coin: .9, mutate: false, c: '#e8c85e' },
+  { id: 'N6', name: '黑暗', hp: 2.5, atk: 2,   extra: 3, coin: .8, mutate: true,  c: '#c96f9a' },
+  { id: 'N9', name: '深渊', hp: 4,   atk: 3,   extra: 5, coin: .6, mutate: true,  c: '#c4303a' },
+];
 const TAU = Math.PI * 2;
 
 const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
@@ -93,6 +100,30 @@ const THEMES = [
   { name: '港口',   floors: ['码头', '货轮船舱', '灯塔'], hue: 205, sat: 22,
     solids: [{ art: 'box', c: '#a84a3a' }, { art: 'barrel', c: '#7a6a4a' }, { art: 'column', c: '#4a5258' }], junk: { art: 'pile', c: '#6a5a3a' } },
 ];
+// ── v5.2 主题怪：按场景改名换色（美术顺序 = ETYPE 键序）；hue=整体色相偏移 ──
+// 顺序: fly,attackfly,gaper,pooter,spider,hopper,splitter,minifly,turret,spreader,ghost,bat,mushroom,bone,eye,glasp
+const THEME_MOBS = {
+  '学校':   { hue: 15,  names: ['黑板蝇','闹事学生','持棍校霸','粉笔投掷手','绊索者','课桌冲撞','炸弹客','小混混','广播炮','起哄甲虫','夜巡孤魂','飞刀贼','孢子值日生','教鞭蛇','监考浮眼','教导主任'] },
+  '办公楼': { hue: -35, names: ['文件蝇','电梯打手','绑匪','蒙面枪手','绊索者','文件突袭者','炸弹客','纸蝇','复印机炮','快递箱虫','加班孤魂','飞刀贼','盆栽孢子','线缆蛇','监控眼','保安队长'] },
+  '医院':   { hue: 130, names: ['绿头尸蝇','小蚊蛊','感染护士','药剂喷吐者','绷带蛛','病床冲撞','感染分裂体','尸蝇幼虫','医疗器械怪','病理甲虫','白毛僵','手术刀贼','消毒菇','绷带木乃伊','档案怨灵','太平间壮汉'] },
+  '商场':   { hue: 60,  names: ['促销传单虫','抢购狂','橱窗模特','化妆品喷罐','衣架蛛','购物车冲撞','美食街炸弹客','吊牌蝇','喷泉炮','甩卖甲虫','试衣幽灵','导购血蝠','中庭盆栽','扶梯骨蛇','珠宝浮眼','仓储熊怪'] },
+  '工厂':   { hue: -20, names: ['车间蚊','巡线打手','装配傀儡','铆钉枪手','车床蜘蛛','钢缆猴','废料分裂体','螺丝蝇','排气炮','熔甲虫','油污孤魂','电弧蝠','菌养罐','齿轮骨蛇','探照浮眼','锅炉怪'] },
+  '地铁':   { hue: -50, names: ['轨道蝇','隧道打手','站台绑匪','投币枪手','电缆蛛','闸机拍','检修分裂体','枕木蝇','信号炮','电流甲虫','末班孤魂','轨道血蝠','通风菇','电缆蛇','广告牌眼','隧道工头'] },
+  '图书馆': { hue: 35,  names: ['书蠹','静默巡管','古籍守卫','橡皮擦投掷手','书架蛛','目录冲撞','纸堆分裂体','纸屑蠹','阅读灯炮','墨迹甲虫','作者残魂','脚灯蝠','苔封菌','卷轴蛇','珍本眼','石碑守卫'] },
+  '酒店':   { hue: 90,  names: ['宴会蚊','闹场打手','行李童绑匪','调酒枪手','浴帘蛛','桌球冲撞手','客房分裂体','房卡蝇','清洁无人机','门童甲虫','13 房幽灵','电梯血蝠','宴会盆栽','地毯蛇','猫眼浮眼','值班经理'] },
+  '仓库':   { hue: -10, names: ['货箱蚁','巡库打手','货箱绑匪','气动钉枪','货架蛛','叉车冲撞','样本分裂体','木屑蚁','分拣机械炮','蛀箱甲虫','夜班孤魂','吊装血蝠','霉变货堆','打包带蛇','监控眼','仓储监工'] },
+  '银行':   { hue: 200, names: ['金库蚁','蒙面打手','营业厅劫匪','验钞喷射者','激光绊索','运钞冲撞','金库分裂体','硬币蚁','警报炮','喷墨甲虫','人质残影','通风管蝠','档案霉菇','电缆骨蛇','监控浮眼','金库门怪'] },
+  '研究所': { hue: 160, names: ['实验蝇','安保打手','实验体α','样本喷射囊','培养蛛','跳闸实验猿','分裂培养体','微型机','低温炮','菌毯甲虫','冷冻舱孤魂','电极蝠','霜菇','冰原狼','寒雾眼','怪物熊'] },
+  '港口':   { hue: -70, names: ['船蛆','走私打手','码头绑匪','鱼叉枪手','缆绳蛛','集装箱冲撞','船舱分裂体','缆绳蠹','信号灯塔炮','船蛆甲虫','溺死孤魂','钩爪血蝠','货舱菇','锈蚀骨蛇','灯塔浮眼','港务监工'] },
+};
+const ETYPE_ORDER = ['fly','attackfly','gaper','pooter','spider','hopper','splitter','minifly','turret','spreader','ghost','bat','mushroom','bone','eye','glasp'];
+function themeMob(id) {
+  const t = game && game.theme && THEME_MOBS[game.theme.name];
+  if (!t) return null;
+  const i = ETYPE_ORDER.indexOf(id);
+  return { hue: t.hue, label: i >= 0 ? t.names[i] : null };
+}
+
 // ── v4.0 爬塔战区：每 5 关一个战区 = 主题区 + 规则特区玩法；31+ 关循环 ──
 const ZONES = [
   { name: '训练区', themes: [0, 1], mod: null, rule: '' },
@@ -117,11 +148,20 @@ function themePal(th, fn) {
 
 // ── 可选角色（纯外观差异）──
 const CHARS = [
-  { id: 'veteran',  name: '老兵',   title: '退役猎兵 · 步枪手', hair: '#5a4634', style: 'short',    suit: '#4a5a3e', skin: '#d9b08c', gun: '#3a3d42', gunType: 'rifle',   bulk: 1.08 },
-  { id: 'agent',    name: '女探员', title: '情报科 · 手枪速射', hair: '#8a4a2e', style: 'ponytail', suit: '#3e4658', skin: '#e6c0a0', gun: '#2e3238', gunType: 'pistol',  bulk: .96 },
-  { id: 'girl',     name: '少女',   title: '后勤奇迹 · 冲锋枪', hair: '#c98a3a', style: 'twintail', suit: '#7a3e58', skin: '#ecc9ae', gun: '#4a4048', gunType: 'smg',     bulk: .9 },
-  { id: 'operator', name: '特工',   title: '幽灵小队 · 狙击手', hair: '#2a2a2e', style: 'cap',      suit: '#2e2e34', skin: '#c9a07e', gun: '#1e2024', gunType: 'marksman', bulk: 1 },
+  { id: 'veteran',  name: '老兵',   title: '退役猎兵 · 步枪手', hair: '#5a4634', style: 'short',    suit: '#4a5a3e', skin: '#d9b08c', gun: '#3a3d42', gunType: 'rifle',   bulk: 1.08, hp: 100, tier: 0 },
+  { id: 'agent',    name: '女探员', title: '情报科 · 手枪速射', hair: '#8a4a2e', style: 'ponytail', suit: '#3e4658', skin: '#e6c0a0', gun: '#2e3238', gunType: 'pistol',  bulk: .96, hp: 130, tier: 1 },
+  { id: 'girl',     name: '少女',   title: '后勤奇迹 · 冲锋枪', hair: '#c98a3a', style: 'twintail', suit: '#7a3e58', skin: '#ecc9ae', gun: '#4a4048', gunType: 'smg',     bulk: .9, hp: 100, tier: 0 },
+  { id: 'operator', name: '特工',   title: '幽灵小队 · 狙击手', hair: '#2a2a2e', style: 'cap',      suit: '#2e2e34', skin: '#c9a07e', gun: '#1e2024', gunType: 'marksman', bulk: 1, hp: 160, tier: 2 },
+  // v5.1 文档三定位：近战型英雄（孙悟空卡池过审后换皮为金箍棒 SSR）
+  { id: 'blade', name: '刀锋', title: '特战近卫 · 白刃专家', hair: '#3a3a44', style: 'short', suit: '#5a2e2e', skin: '#d9b08c', gun: '#4a4048', gunType: 'rifle', bulk: 1.1, melee: true, price: 800, hp: 130, tier: 1 },
 ];
+// 英雄定位（文档 3.1）：近战=近距范围攻击；解锁与突破数据在 Meta.heroes
+const heroUnlocked = (i) => {
+  const ch = CHARS[i]; if (!ch) return false;
+  if (!ch.price) return true;
+  return Object.prototype.hasOwnProperty.call(Meta.load().heroes || {}, ch.id); // 突破阶 0 也是已解锁，不能用真值判断
+};
+const heroBrk = (i) => ((Meta.load().heroes || {})[CHARS[i] && CHARS[i].id] || 0);
 
 // ── 局间元进度：单货币金币（账户余额，v4.0 起服务器同步）+ 永久强化 ──
 const Meta = {
@@ -145,9 +185,24 @@ const Meta = {
     if (typeof this.data.gachaTickets !== 'number') this.data.gachaTickets = 0;
     if (typeof this.data.bioBest !== 'number') this.data.bioBest = 0;      // v5.0 生化模式：最深推进房间号
     if (typeof this.data.bioEscapes !== 'number') this.data.bioEscapes = 0; // 累计成功撤离次数
+    // v5.1 三轨养成：材料 / 英雄解锁与碎片 / 难度选择
+    if (!this.data.mats || typeof this.data.mats !== 'object') this.data.mats = { iron: 0, core: 0 };
+    if (!this.data.heroes || typeof this.data.heroes !== 'object') this.data.heroes = {}; // {id: 突破阶 0-3}；空=未解锁（0 号英雄除外）
+    if (!this.data.shards || typeof this.data.shards !== 'object') this.data.shards = {};
+    if (!this.data.wq || typeof this.data.wq !== 'object') this.data.wq = {};              // 武器品质：{id: 0普通..3传说}
+    if (typeof this.data.bioDiff !== 'number') this.data.bioDiff = 0;
+    if (typeof this.data.econRev !== 'number') this.data.econRev = 0;
     return this.data;
   },
-  save() { try { localStorage.setItem(this.KEY, JSON.stringify(this.data)); } catch (e) { } },
+  save() {
+    // v5.1.1 经济修订号：金币/材料指纹变化即 +1，云端按 rev last-writer-wins（消费真实上云，重登不复活）
+    const d = this.data || {};
+    const fp = d.coins + ':' + ((d.mats && d.mats.iron) | 0) + ':' + ((d.mats && d.mats.core) | 0);
+    if (this._fp !== undefined && this._fp !== fp) d.econRev = (d.econRev || 0) + 1;
+    this._fp = fp;
+    try { localStorage.setItem(this.KEY, JSON.stringify(this.data)); } catch (e) { }
+  },
+  syncFp() { const d = this.data || {}; this._fp = d.coins + ':' + ((d.mats && d.mats.iron) | 0) + ':' + ((d.mats && d.mats.core) | 0); },
   add(n) { this.load().coins += n; this.save(); },          // 实时入账（拾取/击杀/通关）
   spend(n) { const d = this.load(); if (d.coins < n) return false; d.coins -= n; this.save(); return true; },
   buy(id) {
@@ -163,11 +218,11 @@ const Meta = {
 };
 const META_UPS = [
   { id: 'wpn',    name: '武具大师', desc: '初始攻击 +0.8 / 级',   cost: [120, 300, 650], max: 3, c: '#d9a92e' },
-  { id: 'hp',     name: '不灭躯壳', desc: '初始心之上限 +1 / 级', cost: [80, 200, 420],  max: 3, c: '#c4303a' },
+  { id: 'hp',     name: '不灭躯壳', desc: '初始生命上限 +15 / 级', cost: [80, 200, 420],  max: 3, c: '#c4303a' },
   { id: 'spd',    name: '风之步',   desc: '初始移速 +0.15 / 级',  cost: [60, 150, 320],  max: 3, c: '#7fae5a' },
   { id: 'coin',   name: '开运之手', desc: '初始金币 +3 / 级',     cost: [50, 120, 260],  max: 3, c: '#e8c85e' },
   { id: 'dash',   name: '疾风核心', desc: '冲刺冷却 -0.17 秒 / 级',   cost: [60, 180],       max: 2, c: '#7fb2e8' },
-  { id: 'revive', name: '亡者残响', desc: '每局死亡时原地复活一次（2心起步）', cost: [500], max: 1, c: '#b093e8' },
+  { id: 'revive', name: '亡者残响', desc: '每局死亡时原地复活一次（40 血起步）', cost: [500], max: 1, c: '#b093e8' },
 ];
 
 // ── 拦截浏览器缩放：游戏误触的第二根手指不该触发捏合/双击缩放（iOS 无视 user-scalable=no）──
@@ -191,21 +246,13 @@ const Touch = {
     const pbtn = this.pauseBtn = { x: VIEW_W - 36, y: HUD_H + 204, r: 20 };
     const mbtn = this.muteBtn = { x: VIEW_W - 36, y: HUD_H + 164, r: 18 };
     const gbtn = this.mapBtn = { x: VIEW_W - 36, y: HUD_H + 124, r: 18 };
-    this.skillBtns = BIO ? [
-      { id: 'grenade', x: VIEW_W - 44, y: CANVAS_H - 200, r: 30 },
-      { id: 'zap', x: VIEW_W - 44, y: CANVAS_H - 276, r: 30 },
+    this.skillBtns = BIO ? [ // v5.2 技能表跟英雄：全员唯一主动槽=冲锋打击
+      { id: 'dashstrike', x: VIEW_W - 46, y: CANVAS_H - 168, r: 32 },
     ] : [];
     this.bagBtn = BIO ? { x: 44, y: CANVAS_H - 96, r: 30 } : null;
     const pts = e => {
       const r = cv.getBoundingClientRect();
-      if (game.rotOn) { // CSS rotate(90deg)：屏幕(y向下) → 画布逻辑坐标的逆旋转
-        const s = r.height / CANVAS_W, cxp = r.left + r.width / 2, cyp = r.top + r.height / 2;
-        return [...e.changedTouches].map(t => ({
-          id: t.identifier,
-          x: CANVAS_W / 2 + (t.clientY - cyp) / s,
-          y: CANVAS_H / 2 - (t.clientX - cxp) / s
-        }));
-      }
+      // v5.2 强制竖屏：rot 逆变换已删（不存在横屏旋转态）
       const sx = CANVAS_W / r.width, sy = CANVAS_H / r.height; // 逻辑坐标，不受 DPR 影响
       return [...e.changedTouches].map(t => ({
         id: t.identifier, x: (t.clientX - r.left) * sx, y: (t.clientY - r.top) * sy
@@ -273,10 +320,7 @@ const Touch = {
         id: t.identifier, x: 0, y: 0
       })); // 仍在屏上的手指，用于摇杆移交
       const r = cv.getBoundingClientRect();
-      if (game.rotOn) {
-        const s = r.height / CANVAS_W, cxp = r.left + r.width / 2, cyp = r.top + r.height / 2;
-        [...e.touches].forEach((t, i) => { alive[i].x = CANVAS_W / 2 + (t.clientY - cyp) / s; alive[i].y = CANVAS_H / 2 - (t.clientX - cxp) / s; });
-      } else {
+      {
         const sx = CANVAS_W / r.width, sy = CANVAS_H / r.height;
         [...e.touches].forEach((t, i) => { alive[i].x = (t.clientX - r.left) * sx; alive[i].y = (t.clientY - r.top) * sy; });
       }
@@ -291,13 +335,9 @@ const Touch = {
     };
     cv.addEventListener('touchend', end);
     cv.addEventListener('touchcancel', end);
-    // 逻辑坐标换算（含强制横屏旋转逆变换）
+    // 逻辑坐标换算（v5.2 强制竖屏：无旋转态）
     const toLogical = (clientX, clientY) => {
       const r = cv.getBoundingClientRect();
-      if (game.rotOn) {
-        const s = r.height / CANVAS_W, cxp = r.left + r.width / 2, cyp = r.top + r.height / 2;
-        return { x: CANVAS_W / 2 + (clientY - cyp) / s, y: CANVAS_H / 2 - (clientX - cxp) / s };
-      }
       return { x: (clientX - r.left) * (CANVAS_W / r.width), y: (clientY - r.top) * (CANVAS_H / r.height) };
     };
     // 桌面鼠标点击复用同一套菜单命中区（标题/三选一/工坊/结算）

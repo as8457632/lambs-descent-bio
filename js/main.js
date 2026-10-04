@@ -18,7 +18,7 @@ const game = {
 function shake(n) { game.shakeAmt = Math.max(game.shakeAmt, n); }
 
 let cv, cx;
-const BUILD = 'v5.0-bio'; // 版本号水印：bio-mode 分支（生化地下城复刻）
+const BUILD = 'v5.2-bio'; // 版本号水印：bio-mode 分支（生化地下城复刻）
 window.__BUILD = BUILD;
 window.DBG_VP = () => ({ build: BUILD, inner: [innerWidth, innerHeight], vv: window.visualViewport ? [Math.round(visualViewport.width), Math.round(visualViewport.height)] : null, dpr: devicePixelRatio, css: [Math.round(cv ? cv.getBoundingClientRect().width : 0), Math.round(cv ? cv.getBoundingClientRect().height : 0)] });
 
@@ -41,25 +41,17 @@ function boot() {
     // visualViewport 在捏合缩放/平板桌面模式怪癖下可能远小于布局视口 → 取两者较大值，画布永不被压成小方块
     const w = Math.max(vv ? vv.width : 0, window.innerWidth || 0) || CANVAS_W;
     const h = Math.max(vv ? vv.height : 0, window.innerHeight || 0) || CANVAS_H;
-    // 强制横屏：仅竖屏时旋转；用户真把设备转过来了就自动转回正常布局
-    const rot = !BIO && !!game.rotMode && h > w; // v5.0 竖屏原生，不再旋转画布
-    game.rotOn = rot;
-    cv.classList.toggle('rot', rot);
-    document.body.classList.toggle('rot', rot);
-    const s = rot ? Math.min(h / CANVAS_W, w / CANVAS_H) : Math.min(w / CANVAS_W, h / CANVAS_H);
+    // v5.2 强制竖屏：旋转/横屏整套路径删除，画布永远按竖屏等比 letterbox
+    const s = Math.min(w / CANVAS_W, h / CANVAS_H);
     game.rotScale = s;
     const cw = Math.floor(CANVAS_W * s) + 'px', chh = Math.floor(CANVAS_H * s) + 'px';
     if (cv.style.width !== cw) cv.style.width = cw;
     if (cv.style.height !== chh) cv.style.height = chh;
-    if (rot) { // 确定性居中锚点：旋转后包围盒 = (CANVAS_H*s)宽 × (CANVAS_W*s)高
-      cv.style.left = Math.round((w - CANVAS_H * s) / 2) + 'px';
-      cv.style.top = Math.round((h - CANVAS_W * s) / 2) + 'px';
-    } else { cv.style.left = ''; cv.style.top = ''; }
     game.fitScale = s;
     const fsb = document.getElementById('fsbtn');
     if (fsb) {
       fsb.classList.toggle('show', s < (BIO ? .5 : .74)); // v5.0 竖屏原生：全屏按钮只在极小窗才亮，不占 HUD 小地图位
-      fsb.textContent = game.rotMode ? '⛶ 退出全屏' : '⛶ 全屏';
+      fsb.textContent = document.fullscreenElement || document.webkitFullscreenElement ? '⛶ 退出全屏' : '⛶ 全屏';
     }
   }
   window.__fitCanvas = fitCanvas;
@@ -72,42 +64,15 @@ function boot() {
   setInterval(fitCanvas, 1000); // 兜底：个别浏览器丢事件时 1 秒内自愈
   document.addEventListener('fullscreenchange', () => setTimeout(fitCanvas, 120));
   fitCanvas();
-  // 全屏横屏按钮：绕开系统"旋转锁定"（Android 有效；iOS 不支持则改提示）
+  // v5.2 强制竖屏：按钮只做「竖屏全屏」并尝试锁定 portrait，横屏/假旋转整套已删除
   const fsb = document.getElementById('fsbtn');
   if (fsb) {
     const el = document.documentElement;
-    if (!el.requestFullscreen && !el.webkitRequestFullscreen) {
-      fsb.textContent = '↻ 请开启系统自动旋转后横握';
-      fsb.style.fontSize = '12px';
-    }
+    if (!el.requestFullscreen && !el.webkitRequestFullscreen) fsb.style.display = 'none';
     fsb.addEventListener('click', () => {
-      const portrait = () => {
-        const vv = window.visualViewport;
-        return Math.max(vv ? vv.height : 0, innerHeight) > Math.max(vv ? vv.width : 0, innerWidth);
-      };
-      const setRot = on => {
-        game.rotMode = on;
-        cv.classList.toggle('rot', on);
-        document.body.classList.toggle('rot', on); // 让退出按钮浮到画布之上、贴屏幕底缘
-        fitCanvas();
-      };
-      const goFs = () => {
-        try { const r = (el.requestFullscreen || el.webkitRequestFullscreen).call(el); if (r && r.catch) r.catch(() => { }); } catch (e) { }
-      };
-      if (game.rotMode) { // 退出：解除旋转 + 退出全屏
-        setRot(false);
-        if (document.fullscreenElement || document.webkitFullscreenElement) (document.exitFullscreen || document.webkitExitFullscreen).call(document);
-        return;
-      }
-      if (Touch.supported() && portrait()) { goFs(); setRot(true); return; } // 手机竖屏：全屏(收地址栏)+CSS旋转双管齐下，画布铺满
-      goFs();
-      setTimeout(() => {
-        try {
-          const so = screen.orientation;
-          if (so && so.lock) so.lock('landscape').catch(() => { if (portrait()) setRot(true); });
-          else if (portrait()) setRot(true);
-        } catch (e) { if (portrait()) setRot(true); }
-      }, 350);
+      if (document.fullscreenElement || document.webkitFullscreenElement) { (document.exitFullscreen || document.webkitExitFullscreen).call(document); return; }
+      try { const r = (el.requestFullscreen || el.webkitRequestFullscreen).call(el); if (r && r.catch) r.catch(() => { }); } catch (e) { }
+      setTimeout(() => { try { const so = screen.orientation; if (so && so.lock) so.lock('portrait').catch(() => { }); } catch (e) { } }, 350);
     });
   }
   window.game = game;                       // 调试接口：HP/敌人/子弹/房间/道具/属性
@@ -135,6 +100,7 @@ function boot() {
   requestAnimationFrame(frame);
 }
 
+const m0diff = () => Meta.load().bioDiff || 0;
 function newRun(stage = 1, floor = 1) { // floor>1：死亡续爬（从倒下那层重来，不重爬 3 层）
   game.stage = stage;
   game.floorNum = floor;
@@ -142,6 +108,7 @@ function newRun(stage = 1, floor = 1) { // floor>1：死亡续爬（从倒下那
   game.theme = stageTheme(stage);
   game.mod = zoneOf(stage).mod; // 层段规则特区修饰器（T4 生效）
   game.statM = statMul(stage); // 怪物数值乘区（T3）
+  if (BIO) { const df = BIO_DIFFS[m0diff()]; game.diffHp = df.hp; game.diffAtk = df.atk; game.diffCoin = df.coin; game.diffMutate = df.mutate; } // v5.1 难度分级
   game.player = new Player(WORLD_W / 2, WORLD_H / 2);
   game.player.char = Meta.load().char || 0;
   game.particles = []; game.toast = null;
@@ -150,12 +117,19 @@ function newRun(stage = 1, floor = 1) { // floor>1：死亡续爬（从倒下那
   const m = Meta.load();
   const p = game.player;
   p.dmg += .8 * m.up.wpn;
-  p.maxHearts += 2 * m.up.hp; p.hearts = p.maxHearts;
+  p.maxHp = (CHARS[m.char || 0] && CHARS[m.char || 0].hp) || 100; // v5.2 英雄品级血量：白100/绿130/蓝160/紫200（CHARS.hp 定义）
+  if (BIO) {
+    const brk = heroBrk(m.char || 0); // 文档 7.2：碎片突破提升英雄上限（每阶基础属性 +8%）
+    if (brk > 0) { p.dmg *= 1 + .08 * brk; p.speed *= 1 + .08 * brk; p.maxHp = Math.round(p.maxHp * (1 + .08 * brk)); }
+    if (CHARS[m.char || 0] && CHARS[m.char || 0].melee) { p.weapon = { id: 'knife', lvl: 1 }; ownWeapon('knife', 1); p.dmg = Math.max(p.dmg, 7); p.maxHp += 30; } // v5.1.1 刀锋定位：高血(+30)+高攻，自带开山刀
+  }
+  p.maxHp += 15 * m.up.hp; p.hp = p.maxHp;
+  p.ammo = p.clipMax(); p.reloadT = 0; // v5.2 弹药：开局按初始枪压满弹匣
   p.speed += .15 * m.up.spd;
   p.dashCdMax = Math.max(24, p.dashCdMax - 10 * m.up.dash);
   game.reviveAvail = m.up.revive > 0;
-  game.runCoins = 0; game.runEarned = 0; game.levelUps = 0; game.pendingLevelUps = 0; game.levelChoices = null;
-  game.bag = []; game.saved = 0; game.roomNum = 1; game.extractMode = false; game.bossKilled = false; // v5.0 搜打撤：背包/救人/深度
+  game.runCoins = 0; game.runEarned = 0; game.levelUps = 0; game.pendingLevelUps = 0; game.levelChoices = null; game.settled = false;
+  game.bag = []; game.saved = 0; game.roomNum = 1; game.extractMode = false; game.bossKilled = false; game.matCarry = { iron: 0, core: 0 }; // v5.0 搜打撤：背包/救人/深度 + v5.1 随身材料
   if (BIO) { game.runCoins = 3 * m.up.coin; game.runEarned = 3 * m.up.coin; } else p.coins += 3 * m.up.coin; // 开运之手（BIO 计入随身，重置后加）
   Touch.sticks.move = Touch.sticks.aim = null;
   Touch.dashTap = false; Touch.tapped = false; Touch.menuTap = null; Touch.startedInPlay.clear();
@@ -169,6 +143,7 @@ function newRun(stage = 1, floor = 1) { // floor>1：死亡续爬（从倒下那
 // ── 升级三选一 ──
 game.gainXp = function (n) {
   const p = game.player;
+  if (BIO && p.upLv && p.upLv.siphon) n = Math.ceil(n * 1.25); // 紫卡：经验虹吸
   p.xp += n;
   while (p.xp >= p.xpNext) {
     p.xp -= p.xpNext; p.level++;
@@ -179,22 +154,53 @@ game.gainXp = function (n) {
 };
 game.openLevelUp = function () {
   const p = game.player;
-  const pool = UPGRADES.filter(u => (p.upLv[u.id] || 0) < u.max);
+  const avail = u => p.gunLvOf(u) < u.max;
   const picks = [];
-  const bag = pool.slice();
-  for (let i = 0; i < 3 && bag.length; i++)
-    picks.push(bag.splice(Math.floor(Math.random() * bag.length), 1)[0]);
+  const n = BIO ? (p.level % 4 === 0 ? 4 : 3) : 3; // 文档 4.1：每次呈现 3-4 个
+  if (BIO) { // v5.2 细则5：卡源=当前枪池 70% + 通用池 30%，品质加权保留
+    const gunPool = () => UPGRADES.filter(u => u.gun === p.weapon.id && avail(u) && !picks.includes(u));
+    const genPool = () => UPGRADES.filter(u => !u.gun && avail(u) && !picks.includes(u));
+    for (let i = 0; i < n; i++) {
+      let bag = Math.random() < .7 ? gunPool() : genPool();
+      if (!bag.length) bag = gunPool().concat(genPool());
+      if (!bag.length) break;
+      const r = Math.random(), want = r < .05 ? 'SSR' : r < .30 ? 'SR' : 'R';
+      let cand = bag.filter(u => (u.rar || 'R') === want);
+      if (!cand.length) cand = bag;
+      picks.push(choice(cand));
+    }
+  } else {
+    const bag = UPGRADES.filter(u => avail(u)).slice();
+    for (let i = 0; i < n && bag.length; i++) picks.push(bag.splice(Math.floor(Math.random() * bag.length), 1)[0]);
+  }
   game.levelChoices = picks.length ? picks : null;
   if (!game.levelChoices) { game.pendingLevelUps = 0; return; }
   game.state = 'levelup';
   SFX.play('item');
 };
+game.rollSkill = function () { // v5.2 细则5：宝箱/藏品室的技能=当前枪卡池，枪池枯竭回退通用池
+  const p = game.player;
+  let bag = UPGRADES.filter(u => u.gun === p.weapon.id && p.gunLvOf(u) < u.max);
+  if (!bag.length) bag = UPGRADES.filter(u => !u.gun && p.gunLvOf(u) < u.max);
+  return bag.length ? choice(bag) : null;
+};
+game.grantSkill = function (u) {
+  game.applyUpgrade(u);
+  const gname = u.gun ? WEAPONS[u.gun].name : '通用';
+  game.toast = { item: { name: `获得技能：${u.name}`, desc: `${u.desc} —— 隶属 ${gname}`, color: u.rar === 'SSR' ? '#b093e8' : u.rar === 'SR' ? '#7fb2e8' : '#7fae5a' }, t: 190 }; // v5.2 门禁P1：toast 边框用品质色
+  SFX.play('item');
+};
+game.applyUpgrade = function (u) { // v5.2：通用卡即时 apply；枪卡入 gunLv（切枪仍保留，只在持该枪时生效）
+  const p = game.player;
+  if (u.gun) { (p.gunLv[u.gun] = p.gunLv[u.gun] || {})[u.id] = (p.gunLv[u.gun][u.id] || 0) + 1; if (u.apply) u.apply(p); }
+  else { p.upLv[u.id] = (p.upLv[u.id] || 0) + 1; u.apply(p); }
+  if (WEAPONS[p.weapon.id].clip) { const cm = p.clipMax(); if (p.ammo > cm) p.ammo = cm; } // 弹药上限卡即时生效时收敛
+};
 game.pickUpgrade = function (i) {
   const u = game.levelChoices && game.levelChoices[i];
   if (!u) return;
   const p = game.player;
-  p.upLv[u.id] = (p.upLv[u.id] || 0) + 1;
-  u.apply(p);
+  game.applyUpgrade(u);
   game.levelUps++;
   game.toast = { item: { name: u.name, desc: u.desc, color: u.c }, t: 140 };
   game.pendingLevelUps--;
@@ -227,14 +233,16 @@ function enterRoom(room, fromDir) {
     const [vx, vy] = DVEC[side];
     ex -= vx * TILE * 1.35; ey -= vy * TILE * 1.35;
   }
+  if (BIO) { // v5.1.1：倍率先于内容生成，首批刷怪必须吃到本房 N（门禁 P0-N1）
+    game.roomNum = (room.dist || 0) + 1;
+    const N = game.roomNum, stg = (game.stage || 1) - 1;
+    game.statM = (game.diffHp || 1) * (1 + .25 * N) * (1 + .10 * stg);
+    game.atkM = (game.diffAtk || 1) * (1 + .2 * N) * (1 + .05 * stg);
+  }
   createRoomContents(room, game.floorNum, ex, ey);
   modOnEnter(room); // 战区环境重掷（风向等）
-  if (BIO) { // 复刻原作技能逐个点亮：第 2 间手雷、第 5 间符咒
-    game.roomNum = (room.dist || 0) + 1;
-    if (!Touch.supported() && !game.taughtKeys) { game.taughtKeys = true; game.hint = { text: '自动射击中：WASD 走位 · J 手雷 · K 符咒 · Space 冲刺', t: 300 }; }
-    const sk = game.player.skills;
-    if (game.roomNum >= 2 && !sk[0].unlocked) { sk[0].unlocked = true; game.toast = { item: { name: '解锁技能：手雷', desc: '点击右侧雷字按钮，掷向最近敌人范围爆炸', color: '#a8c05a' }, t: 200 }; }
-    if (game.roomNum >= 5 && !sk[1].unlocked) { sk[1].unlocked = true; game.toast = { item: { name: '解锁技能：符咒', desc: '全屏链电 + 麻痹 1.5 秒', color: '#ffe066' }, t: 200 }; }
+  if (BIO) { // v5.2：主动技能随英雄开局自带（不再按房间逐个点亮）
+    if (!Touch.supported() && !game.taughtKeys) { game.taughtKeys = true; game.hint = { text: '自动射击中：WASD 走位 · J 冲锋打击 · Space 冲刺', t: 300 }; } // v5.2 技能跟英雄：开局即带冲锋打击
   }
   game.player.x = ex; game.player.y = ey;
   // 相机瞬移到出生点视口中心，进房不"甩镜头"
@@ -246,7 +254,7 @@ function enterRoom(room, fromDir) {
     SFX.play('doorOpen');
     if (!game.taughtClear) { // 首次进战斗房的教学提示，一局只出现一次
       game.taughtClear = true;
-      game.hint = { text: '清光敌人，门才会开 —— 方向键/右摇杆射击', t: 260 };
+      game.hint = { text: BIO ? '清光敌人，门才会开 —— 跟着绿色箭头走' : '清光敌人，门才会开 —— 方向键/右摇杆射击', t: 260 };
     }
   }
   if (room.boss) SFX.play('bossRoar');
@@ -269,10 +277,21 @@ function update() {
     game.selStage = clamp(game.selStage || 1, 1, unlocked);
     const sb = stageBtnZones();
     for (let i = 0; i < CHARS.length; i++) {
-      if (Input.pressed('Digit' + (i + 1)) || (mt && inZone(charZoneHit(mt), charZones()[i]))) { m.char = i; Meta.save(); SFX.play('coin'); Touch.tapped = false; } // 点卡=只选人，不触发"点屏开局"
+      const hitCard = Input.pressed('Digit' + (i + 1)) || (mt && inZone(charZoneHit(mt), charZones()[i]));
+      if (!hitCard) continue;
+      if (BIO && CHARS[i].price && !heroUnlocked(i)) { // v5.1 英雄直购（文档 3.1：金币解锁）
+        if (m.coins >= CHARS[i].price) {
+          m.coins -= CHARS[i].price; (m.heroes = m.heroes || {})[CHARS[i].id] = 0; m.char = i; Meta.save();
+          if (window.CloudSave) CloudSave.queue();
+          game.toast = { item: { name: `解锁英雄：${CHARS[i].name}`, desc: '近战型 · 高血高攻，自带开山刀', color: '#e8c85e' }, t: 200 };
+          SFX.play('item');
+        } else { SFX.play('deny'); game.hint = { text: `${CHARS[i].name} 需 ${CHARS[i].price} 账户金币（撤离结算获得）`, t: 150 }; }
+      } else { m.char = i; Meta.save(); SFX.play('coin'); } // 点卡=只选人，不触发"点屏开局"
+      Touch.tapped = false;
     }
     if (Input.pressed('ArrowLeft') || Input.pressed('KeyA') || (mt && inZone(mt, sb.l))) { game.selStage = Math.max(1, game.selStage - 1); SFX.play('shoot'); Touch.tapped = false; }
     else if (Input.pressed('ArrowRight') || Input.pressed('KeyD') || (mt && inZone(mt, sb.r))) { game.selStage = Math.min(unlocked, game.selStage + 1); SFX.play('shoot'); Touch.tapped = false; }
+    const onDiffPill = (() => { if (!BIO || !mt) return false; const dz = bioDiffZones(); const di = dz.findIndex(z => inZone(mt, z)); if (di < 0) return false; Meta.load().bioDiff = di; Meta.save(); SFX.play('coin'); Touch.tapped = false; return true; })();
     const onStageBtn = mt && (inZone(mt, sb.l) || inZone(mt, sb.r));
     const onCharCard = (() => { const h = charZoneHit(mt); return h && CHARS.some((_, i) => inZone(h, charZones()[i])); })();
     if (mt && inZone(mt, accountZone())) {
@@ -284,7 +303,7 @@ function update() {
     else if (Input.pressed('KeyS')) { game.workshopFrom = 'title'; game.state = 'workshop'; }
     else if (mt && inZone(mt, workshopBtnZone())) { game.workshopFrom = 'title'; game.state = 'workshop'; }
     else if (mt && inZone(mt, acctBtnZone())) { game.state = 'account'; game.acctTab = 'main'; SFX.play('coin'); Touch.tapped = false; return; }
-    else if (mt && !onStageBtn && !onCharCard && !inZone(mt, acctBtnZone())) newRun(game.selStage); // 点选人/选关/账号区外才开局
+    else if (mt && !onStageBtn && !onCharCard && !onDiffPill && !inZone(mt, acctBtnZone())) newRun(game.selStage); // 点选人/选关/难度/账号区外才开局
     else if (Touch.tapped) newRun(game.selStage);
     Touch.tapped = false;
     return;
@@ -344,7 +363,7 @@ function update() {
     return;
   }
   if (game.state === 'levelup') {
-    for (let i = 0; i < 3; i++) if (Input.pressed('Digit' + (i + 1))) game.pickUpgrade(i);
+    for (let i = 0; i < 4; i++) if (Input.pressed('Digit' + (i + 1))) game.pickUpgrade(i);
     const mt = Touch.menuTap; Touch.menuTap = null;
     if (mt) {
       const zones = levelCardZones();
@@ -356,9 +375,23 @@ function update() {
   if (game.state === 'workshop') {
     const mt = Touch.menuTap; Touch.menuTap = null;
     if (Input.pressed('Escape') || (mt && inZone(mt, backBtnZone()))) {
+      if (game.wsCraft) { game.wsCraft = false; Touch.tapped = false; return; } // 合成子视图先退回工坊列表
       game.state = (game.workshopFrom === 'dead' || game.workshopFrom === 'win') ? game.workshopFrom : 'title';
       Touch.tapped = false; return;
     }
+    if (game.wsCraft) { // v5.1 武器合成
+      const owned = Object.keys(WEAPONS).filter(weaponOwned);
+      owned.forEach((wid, i) => {
+        if (mt && inZone(mt, craftBtnZone(i))) {
+          const r = craftWeapon(wid);
+          SFX.play(r === 'ok' ? 'item' : 'deny');
+          if (r === 'ok') game.toast = { item: { name: `${WEAPONS[wid].name} 升为${WQ_NAMES[Meta.load().wq[wid]]}`, desc: '品质 +15% 伤害并解锁词条', color: '#e8c85e' }, t: 180 };
+        }
+      });
+      Touch.tapped = false;
+      return;
+    }
+    if (mt && inZone(mt, metaRowZone(6))) { game.wsCraft = true; SFX.play('coin'); Touch.tapped = false; return; }
     for (let i = 0; i < META_UPS.length; i++) {
       const want = Input.pressed('Digit' + (i + 1)) || (mt && inZone(mt, metaRowZone(i)));
       if (want) { const r = Meta.buy(META_UPS[i].id); SFX.play(r === 'ok' ? 'coin' : 'deny'); if (r === 'ok') CloudSave.queue(); }
@@ -459,7 +492,7 @@ function update() {
   if (room.trapdoor && dist2(p.x, p.y, room.trapdoor.x, room.trapdoor.y) < 26) {
     SFX.play('trapdoor');
     game.runCoins += 30 * game.floorNum; game.runEarned += 30 * game.floorNum; Meta.add(30 * game.floorNum); // 过层奖励实时入账
-    p.heal(2);
+    p.heal(20);
     loadFloor(game.floorNum + 1);
   }
 
@@ -479,7 +512,8 @@ function handleCollisions(room) {
           if (tr.fuseT !== undefined) { // 罐罐雷贴身引爆：伤害只走 plop 的爆炸 AoE，不直伤+爆炸双算
             hit = true; break;
           }
-          e.hit(tr.dmg, room, tr.x, tr.y);
+          e.hit(BIO && p.upLv.execute && e.stun > 0 ? tr.dmg * 1.5 : tr.dmg, room, tr.x, tr.y); // 处决协同对远程同样生效
+          if (tr.burn && e.hp > 0) { e.burnT = Math.max(e.burnT || 0, 180); e.burnD = Math.max(e.burnD || 0, 3); } // v5.2 引燃弹：灼烧 3 秒
           game.fx.push({ type: 'spark', id: tr.spId || (tr.colorKey === 'spark' ? 'light' : 'tear'), x: tr.x, y: tr.y, ang: Math.atan2(-tr.vy, -tr.vx), r: tr.r + 5, t: 12, t0: 12 });
           tr.hits.push(e);
           if (tr.pierce > 0) { tr.pierce--; } // 穿透：不消失，换下一个目标
@@ -500,19 +534,26 @@ function handleCollisions(room) {
       }
       if (hit) tr.plop(room, 'hit');
     } else if (p.inv <= 0 && dist2(tr.x, tr.y, p.x, p.y) < tr.r + p.r * .75) {
-      p.hurt(tr.dmg, game, tr.x, tr.y, '敌方弹幕'); tr.plop(room, 'hit');
+      p.hurt(tr.dmg, game, tr.x, tr.y, '敌方弹幕'); if (tr.slow) p.slowT = 60; tr.plop(room, 'hit');
     }
   }
   // 接触伤害（出生动画期间的敌人不伤人；双向击退制造挨打感）
   for (const e of room.enemies) {
     if (!e.dead && e.spawnT <= 0 && dist2(e.x, e.y, p.x, p.y) < e.r + p.r * .75) {
-      p.hurt(Math.ceil(e.cfg.dmg * Math.sqrt(game.statM || 1)), game, e.x, e.y, e.cfg.label + (e.elite ? '·精英' : ''));
+      let dmg = BIO ? (e.elite ? 18 : 10) : Math.ceil(e.cfg.dmg * Math.sqrt(game.statM || 1)); // v5.2 门禁P0：承伤固定口径，难度压力由怪量/血量体现，不吃 atkM
+      if (BIO && e.cfg.id === 'bat' && e.state === 'air') dmg *= 2; // 文档：猎杀者冲刺命中伤×2
+      p.hurt(dmg, game, e.x, e.y, ((typeof themeMob === 'function' && themeMob(e.cfg.id) || {}).label || e.cfg.label) + (e.elite ? '·精英' : '')); // v5.2 主题怪名
+      if (BIO && e.cfg.id === 'attackfly' && e.elite) { // 双头犬连咬：第 2 次接触附加 0.5s 眩晕
+        e.bite = (e.bite || 0) + 1;
+        if (e.bite % 2 === 0) { p.stunT = Math.max(p.stunT || 0, 30); game.flashT = Math.max(game.flashT, 6); }
+      }
+      if (BIO && p.upLv && p.upLv.thorns && e.hp > 0 && p.hp > 0) e.hit(2 * p.upLv.thorns, room, e.x, e.y); // 荆棘反伤
       const d = Math.max(1, dist2(e.x, e.y, p.x, p.y));
       moveCircle(e, (e.x - p.x) / d * 20, (e.y - p.y) / d * 20, room);
     }
   }
   if (room.boss && !room.boss.dead && dist2(room.boss.x, room.boss.y, p.x, p.y) < room.boss.r * .85 + p.r * .7) {
-    p.hurt(Math.ceil((game.floorNum >= 3 ? 3 : 2) * Math.sqrt(game.statM || 1)), game, room.boss.x, room.boss.y, room.boss.cfg.name); // 前期 Boss 接触伤减半心
+    p.hurt(BIO ? 25 : Math.ceil((game.floorNum >= 3 ? 3 : 2) * Math.sqrt(game.statM || 1)), game, room.boss.x, room.boss.y, room.boss.cfg.name); // v5.2 门禁P0：BOSS 重击恒 -25，100 血至少挨四下
   }
 }
 
@@ -535,19 +576,22 @@ function onRoomCleared(room) {
       SFX.play('item');
     }
     const cxr = WORLD_W / 2, cyr = WORLD_H / 2;
-    room.pickups.push(new Pickup('chest', cxr - 40, cyr));
-    if (!BIO && game.floorNum < 3) room.trapdoor = { x: cxr + 44, y: cyr }; // 生化模式：BOSS 房即终点，无下潜
-    else room.finalChest = true;
-    game.hint = { text: game.floorNum < 3 ? 'Boss 已死！清光残敌，踩开启的地洞下潜' : 'Boss 已死！打开宝箱解救人质', t: 300 };
+    if (!BIO) room.pickups.push(new Pickup('chest', cxr - 40, cyr)); // v5.2：生化模式每房唯一宝箱=进房初始箱
+    if (BIO) { // 文档：BOSS 必掉武器合成材料
+      room.pickups.push(new Pickup('mat', cxr + 30, cyr - 20, CRAFT_MATS.iron));
+      room.pickups.push(new Pickup('mat', cxr + 54, cyr + 6, CRAFT_MATS.core));
+    }
+    if (!BIO) {
+      if (game.floorNum < 3) room.trapdoor = { x: cxr + 44, y: cyr };
+      else room.finalChest = true;
+      game.hint = { text: game.floorNum < 3 ? 'Boss 已死！清光残敌，踩开启的地洞下潜' : 'Boss 已死！打开宝箱解救人质', t: 300 };
+    } else {
+      game.hint = { text: '杜尔加倒了，深度撤离通道开启！', t: 300 };
+      game.victory(); // v5.2 制作人口径：击败关底 BOSS = 通关，无需再开箱
+    }
   } else {
     rollClearReward(room, game.floorNum);
     if (!room.boss && !game.taughtDoor) { game.taughtDoor = true; game.hint = { text: '门已开！看小地图找亮格，走到房间边缘的门撤离', t: 240 }; }
-    if (room.type === 'normal' && !game.floor.gaveStarter) {
-      game.floor.gaveStarter = true;
-      const sw = pickWeaponId(game.player);
-      if (sw) game.cur.pickups.push(new Pickup('weapon', WORLD_W / 2 + rand(-40, 40), WORLD_H / 2 + rand(-30, 30), null, 0, sw));
-      game.hint = { text: '拾取武器：同一把枪再捡会升级，换枪会归零', t: 240 };
-    }
   }
 }
 
@@ -556,6 +600,19 @@ function tryDoors(room) {
   for (const d of DIRS) {
     const nb = room.links[d];
     if (!nb) continue;
+    if (room.doorCost && room.doorCost[d] && !room.doorOpen[d]) { // v5.1 奖励房：付随身金币开门，付不起只提示
+      const cost = room.doorCost[d];
+      const [ddx, ddy] = DOOR_CELL[d]; // v5.1.1：走到门前才扣款，清房隔空自动付费是bug（门禁 P1）
+      if (dist2(p.x, p.y, ddx * TILE + TILE / 2, ddy * TILE + TILE / 2) > TILE * 2.4) continue;
+      if (game.runCoins >= cost) {
+        game.runCoins -= cost; room.doorOpen[d] = true;
+        SFX.play('coin'); game.hint = { text: `支付 ${cost} 随身金币，奖励房开了！`, t: 140 };
+      } else if (!room.denyT || game.runTime - room.denyT > 60) {
+        room.denyT = game.runTime; SFX.play('deny');
+        game.hint = { text: `奖励房需 ${cost} 随身金币（击杀掉落，可跳过不阻塞主线）`, t: 160 };
+      }
+      continue;
+    }
     const [dx, dy] = DOOR_CELL[d];
     const cxx = dx * TILE + TILE / 2, cyy = dy * TILE + TILE / 2;
     if (dist2(p.x, p.y, cxx, cyy) < TILE * .72) {
@@ -603,9 +660,18 @@ game.bankRun = function () {
   const m = Meta.load();
   const lootVal = (game.bag || []).reduce((a, b) => a + b.val * b.n, 0);
   const savedVal = (game.saved || 0) * 100;
-  const total = (game.runCoins || 0) + lootVal + savedVal;
+  const coinVal = Math.round((game.runCoins || 0) * (game.diffCoin || 1)); // 文档 6.2：高难金币获取 ×0.6~0.9
+  let total = coinVal + lootVal + savedVal;
+  game.hopeless = !game.bossKilled; // 次要出口：中途撤离结算 6 折（制作人拍板）
+  if (game.hopeless) total = Math.round(total * .6);
+  game.coinVal = coinVal;
   if (total > 0) Meta.add(total);
   game.runBanked = total; game.lootVal = lootVal; game.savedVal = savedVal;
+  game.score = game.kills * 10 + game.roomNum * 50 + (game.saved || 0) * 100 + Math.max(0, 600 - Math.floor((game.runTime || 0) / 60) * 20); // 文档 7.1 积分
+  if (game.matCarry) { // 随身材料入局外库（撤离专属；死亡走 die 分支不带出）
+    m.mats.iron = Math.min(999, m.mats.iron + (game.matCarry.iron || 0)); m.mats.core = Math.min(999, m.mats.core + (game.matCarry.core || 0));
+    game.matGain = Object.assign({}, game.matCarry); game.matCarry = { iron: 0, core: 0 };
+  }
   m.bioBest = Math.max(m.bioBest || 0, game.roomNum || 1);
   m.bioEscapes = (m.bioEscapes || 0) + 1;
   Meta.save();
@@ -613,6 +679,7 @@ game.bankRun = function () {
 };
 game.retreat = function () { // 踩撤离点：中途成功撤离
   if (BIO) {
+    if (game.settled) return; game.settled = true; // v5.2 门禁P1：结算幂等
     game.bossKilled = false;
     game.bankRun();
     game.extractMode = true;
@@ -634,7 +701,7 @@ game.die = function () {
   const m = Meta.load();
   if (BIO) { // 搜打撤铁律：没撤出去 = 全丢（随身金币/背包/幸存者），账户存量不动
     game.dieLost = (game.runCoins || 0) + (game.bag || []).reduce((a, b) => a + b.val * b.n, 0) + (game.saved || 0) * 100;
-    game.runCoins = 0; game.bag = []; game.saved = 0;
+    game.runCoins = 0; game.bag = []; game.saved = 0; game.matCarry = { iron: 0, core: 0 };
     game.diePenalty = 0;
     SFX.play('death');
     return;
@@ -645,6 +712,8 @@ game.die = function () {
   SFX.play('death');
 };
 game.victory = function () {
+  if (BIO && game.settled) return; // v5.2 门禁P1：结算幂等，防竞态双计
+  game.settled = true;
   game.state = 'win'; game.mapOpen = false;
   const m = Meta.load();
   if (BIO) { // 深度撤离：通关奖先并随身，只 bankRun 一次（两次 queue 会让服务器 delta 双计）
@@ -672,7 +741,7 @@ function draw() {
   cx.fillRect(0, 0, CANVAS_W, CANVAS_H);
 
   if (game.state === 'title') { drawTitle(); return; }
-  if (game.state === 'workshop') { drawWorkshop(cx, game); return; }
+  if (game.state === 'workshop') { game.wsCraft ? drawCraft(cx, game) : drawWorkshop(cx, game); return; }
   if (game.state === 'account') { (game.acctTab === 'armory' ? drawArmoryPanel : drawAccountPanel)(cx, game); return; } // 面板态短路，不走战场渲染
 
   const pal = themePal(game.theme || THEMES[0], game.floorNum);
@@ -683,6 +752,7 @@ function draw() {
 
   drawRoom(cx, game.cur, pal, game.time);
   drawHazards(cx, game.cur, game.time); // v4.3 钉子/漩涡（地面之上、拾取物之下）
+  if (BIO && game.state === 'play') drawBioArrows(cx, game.cur, game.time); // v5.1 单出口指引箭头
   for (const pk of game.cur.pickups) if (!pk.dead) drawPickup(cx, pk, game.time);
   for (const e of game.cur.enemies) drawEnemy(cx, e, game.time);
   if (game.cur.boss && !game.cur.boss.dead) drawBoss(cx, game.cur.boss, game.time);
@@ -700,7 +770,7 @@ function draw() {
   drawHUD(cx, game);
   if (game.state === 'play') modHudTag(cx); // 战区规则徽标
   if (game.cur.boss && !game.cur.boss.dead && game.state === 'play') drawBossBar(cx, game.cur.boss);
-  if (game.state === 'play' && !BIO && !game.rotMode && cv.getBoundingClientRect().width < 700) { // 画面过小：自救指引（BIO 竖屏原生，不需要）
+  if (game.state === 'play' && !BIO && cv.getBoundingClientRect().width < 700) { // 画面过小：自救指引（BIO 竖屏原生，不需要）
     cx.fillStyle = 'rgba(120,20,20,.88)'; cx.fillRect(VIEW_W / 2 - 258, HUD_H + 2, 516, 36);
     cx.strokeStyle = '#e8c85e'; cx.lineWidth = 1; cx.strokeRect(VIEW_W / 2 - 258, HUD_H + 2, 516, 36);
     cx.fillStyle = '#ffe0c0'; cx.font = 'bold 13px monospace'; cx.textAlign = 'center';
@@ -710,8 +780,20 @@ function draw() {
     cx.fillText(`诊断[${BUILD}] inner=${innerWidth}x${innerHeight} vv=${vv ? Math.round(vv.width) + 'x' + Math.round(vv.height) + ' scale=' + vv.scale.toFixed(2) : '-'} dpr=${devicePixelRatio}`, VIEW_W / 2, HUD_H + 32);
     cx.textAlign = 'left';
   }
-  if (game.state === 'play' && game.cur.quota && !game.cur.cleared) { // 房间底部配额进度：杀到多少才开门一目了然
+  if (game.state === 'play' && game.cur.quota && !game.cur.cleared) { // 文档 8.2：顶部波次进度条 + 剩余敌数
     const q = game.cur.quota, k = Math.min(game.cur.killed, q), cxb = VIEW_W / 2;
+    if (BIO) {
+      const bw = 240;
+      cx.fillStyle = 'rgba(0,0,0,.55)'; cx.fillRect(cxb - bw / 2, HUD_H - 16, bw, 12);
+      cx.fillStyle = '#d9a92e'; cx.fillRect(cxb - bw / 2 + 2, HUD_H - 14, (bw - 4) * (k / q), 8);
+      cx.strokeStyle = 'rgba(217,169,46,.7)'; cx.lineWidth = 1; cx.strokeRect(cxb - bw / 2, HUD_H - 16, bw, 12);
+      cx.fillStyle = '#f0e2c0'; cx.font = 'bold 10px monospace'; cx.textAlign = 'center';
+      cx.fillText(`第 ${game.roomNum} 区 · 歼灭 ${k}/${q} · 剩余 ${game.cur.enemies.length}`, cxb, HUD_H - 20);
+      const sec = Math.floor(game.runTime / 60);
+      cx.textAlign = 'right'; cx.fillStyle = '#8a7a66'; cx.font = '10px monospace';
+      cx.fillText(`${String(Math.floor(sec / 60)).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}`, VIEW_W - 10, 22); // v5.1.1：计时上移到右列顶端，与金币/积分/冲刺成纵列
+      cx.textAlign = 'left';
+    } else {
     cx.fillStyle = 'rgba(0,0,0,.55)'; cx.fillRect(cxb - 72, CANVAS_H - 24, 144, 15);
     cx.fillStyle = '#d9a92e'; cx.fillRect(cxb - 70, CANVAS_H - 22, 140 * (k / q), 11);
     cx.strokeStyle = 'rgba(217,169,46,.7)'; cx.lineWidth = 1; cx.strokeRect(cxb - 72, CANVAS_H - 24, 144, 15);
@@ -719,12 +801,32 @@ function draw() {
     cx.strokeStyle = 'rgba(10,6,4,.9)'; cx.lineWidth = 3; cx.strokeText(`本房猎杀 ${k}/${q}`, cxb, CANVAS_H - 13); // 描边防金色填充吃字
     cx.fillText(`本房猎杀 ${k}/${q}`, cxb, CANVAS_H - 13);
     cx.textAlign = 'left';
+    }
+  }
+  if (BIO && game.state === 'play') { // v5.2 弹匣指示：波次条正下方弹丸点（品质色=有弹，灰=已耗）+ 换弹进度弧；清房走廊里也常显
+    const pw = WEAPONS[game.player.weapon.id], cm = game.player.clipMax();
+    if (pw.clip && cm > 0) {
+      const a = Math.max(0, game.player.ammo), rl = game.player.reloadT;
+      const gap = 10, x0 = VIEW_W / 2 - (cm - 1) * gap / 2, yy = HUD_H + 11;
+      for (let i = 0; i < cm; i++) {
+        cx.beginPath(); cx.arc(x0 + i * gap, yy, 3.6, 0, TAU);
+        cx.fillStyle = i < a ? (RAR_C[pw.rar] || '#cfc6b8') : 'rgba(110,100,90,.5)';
+        cx.fill();
+      }
+      cx.font = 'bold 9px monospace'; cx.textAlign = 'right'; cx.fillStyle = rl > 0 ? '#e8c85e' : '#8a7a66';
+      cx.fillText(rl > 0 ? '换弹…' : `${a}/${cm}`, x0 - 10, yy + 3);
+      if (rl > 0) {
+        cx.strokeStyle = '#e8c85e'; cx.lineWidth = 2;
+        cx.beginPath(); cx.arc(x0 - 24 - cx.measureText('换弹…').width, yy, 6, -Math.PI / 2, -Math.PI / 2 + TAU * (1 - rl / game.player.reloadDur())); cx.stroke();
+      }
+      cx.textAlign = 'left';
+    }
   }
   drawVignette(cx, game);
   if (game.state === 'play') drawStragglers(cx, game); // 屏外残敌方位箭头
   if (!IS_MOBILE && !BIO) drawSidePanel(cx, game); // v5.0 竖屏无侧栏
   else drawMobileOverlay(cx, game); // 手机：右上叠层小地图 + 金币计数
-  if (IS_MOBILE && !BIO && !game.rotMode && innerHeight > innerWidth && game.state === 'play' && !game.mapOpen && !game.paused) { // 竖屏观感自救：引导卡（BIO 原生竖屏，隐藏）
+  if (IS_MOBILE && !BIO && innerHeight > innerWidth && game.state === 'play' && !game.mapOpen && !game.paused) { // 竖屏观感自救：引导卡（BIO 原生竖屏，隐藏）
     cx.fillStyle = 'rgba(8,6,5,.78)';
     cx.beginPath(); cx.roundRect(VIEW_W / 2 - 210, CANVAS_H - 66, 420, 40, 8); cx.fill();
     cx.strokeStyle = '#b08a3a'; cx.lineWidth = 1.5;
@@ -833,10 +935,23 @@ function drawTitle() {
     ctx.save(); ctx.translate(z.x + z.w / 2, z.y + (BIO ? 66 : 52)); ctx.scale(BIO ? 2.4 : 2.1, BIO ? 2.4 : 2.1);
     drawPlayer(ctx, { x: 0, y: 0, inv: 0, anim: 0, moving: false, aim: { x: .55, y: -.35 }, shotsPerDir: 1, char: i }, t);
     ctx.restore();
+    const locked = BIO && ch.price && !heroUnlocked(i);
+    if (locked) { // 未解锁英雄：压暗 + 价格独立一行（v5.1.1 P0-U1：不与名字同行叠字）
+      ctx.fillStyle = 'rgba(5,4,3,.62)'; ctx.beginPath(); ctx.roundRect(z.x, z.y, z.w, z.h, 9); ctx.fill();
+      ctx.fillStyle = '#e8c85e'; ctx.font = 'bold 11px monospace'; ctx.textAlign = 'center';
+      ctx.fillText(`解锁 ${ch.price} 币`, z.x + z.w / 2, z.y + z.h - 44);
+    }
+    if (BIO && ch.tier !== undefined) { // v5.2 门禁P1：英雄品级色（白/绿/蓝/紫）角标
+      const TC = ['#cfc6b8', '#7fae5a', '#7fb2e8', '#b093e8'];
+      ctx.fillStyle = TC[ch.tier] || TC[0]; ctx.beginPath(); ctx.arc(z.x + 13, z.y + 13, 5.5, 0, TAU); ctx.fill();
+      ctx.font = 'bold 9px monospace'; ctx.textAlign = 'left'; ctx.fillText(['白级', '绿级', '蓝级', '紫级'][ch.tier] || '', z.x + 22, z.y + 16);
+    }
     ctx.fillStyle = sel ? '#e8c85e' : '#b0a08a'; ctx.font = 'bold 13px monospace'; ctx.textAlign = 'center';
     ctx.fillText(ch.name, z.x + z.w / 2, z.y + z.h - 22);
     ctx.fillStyle = '#6a5c4c'; ctx.font = '9px monospace';
-    ctx.fillText(ch.title, z.x + z.w / 2, z.y + z.h - 8);
+    let tt = ch.title, tw = ctx.measureText(tt).width; // v5.1.1：称号超卡宽自动缩字，防裁切溢出
+    if (tw > z.w - 6) ctx.font = `bold ${Math.max(7, Math.floor(9 * (z.w - 6) / tw))}px monospace`;
+    ctx.fillText(tt, z.x + z.w / 2, z.y + z.h - 8);
   });
 
   // 脚下血泊与泪迹
@@ -859,6 +974,21 @@ function drawTitle() {
   ctx.fillText(`第 ${sel} 关 · ${z0.name}${isGate(sel) ? ' · 门槛' : ''}`, ROOM_W / 2, UIY(369));
   ctx.fillStyle = '#9cb0c8'; ctx.font = '10px monospace';
   ctx.fillText(`${th0.name} · ${z0.rule || '解救人质，逐层深入'}`, ROOM_W / 2, UIY(385));
+  if (BIO) { // v5.1 难度分级选择条
+    const dz = bioDiffZones(), cur = Meta.load().bioDiff || 0;
+    ctx.font = '10px monospace'; ctx.fillStyle = '#8a7a66'; ctx.textAlign = 'center';
+    ctx.fillText('难 度', ROOM_W / 2, dz[0].y - 6);
+    BIO_DIFFS.forEach((df, i) => {
+      const z = dz[i];
+      ctx.fillStyle = i === cur ? 'rgba(46,33,16,.95)' : 'rgba(14,11,8,.85)';
+      ctx.beginPath(); ctx.roundRect(z.x, z.y, z.w, z.h, 6); ctx.fill();
+      ctx.strokeStyle = i === cur ? df.c : '#3a2e24'; ctx.lineWidth = i === cur ? 2 : 1;
+      ctx.beginPath(); ctx.roundRect(z.x, z.y, z.w, z.h, 6); ctx.stroke();
+      ctx.fillStyle = i === cur ? df.c : '#6b5a4a'; ctx.font = 'bold 12px monospace';
+      ctx.fillText(`${df.id} ${df.name}`, z.x + z.w / 2, z.y + 20);
+    });
+    ctx.textAlign = 'left';
+  }
   const fly = { cfg: ETYPE.fly, x: ROOM_W / 2 + Math.cos(t * .04) * 150, y: UIY(190) + Math.sin(t * .04) * 10, r: 12, flash: 0, spawnT: 0 };
   const fly2 = { cfg: ETYPE.attackfly, x: ROOM_W / 2 + Math.cos(t * .05 + 3) * 190, y: UIY(202) + Math.sin(t * .03) * 8, r: 11, flash: 0, spawnT: 0 };
   drawEnemy(ctx, fly, t); drawEnemy(ctx, fly2, t);
@@ -869,8 +999,8 @@ function drawTitle() {
     cx.fillText(Touch.supported() ? '轻触屏幕 开始行动' : '按 Enter 开始行动', ROOM_W / 2, UIY(424));
   }
   drawWorkshopBtn(cx, game);
-  cx.fillStyle = '#8a7a66'; cx.font = '12px monospace';
-  cx.fillText(BIO ? (Touch.supported() ? '单指移动 · 自动射击 · 搜打撤：带物资活着撤离才算赚' : 'WASD 移动 · 自动射击 · Space 冲刺 · 活着撤离带走物资') : (Touch.supported() ? '左摇杆移动 · 右摇杆射击 · 打怪升级三选一 · 赚金币进工坊' : 'WASD 移动 · 方向键射击 · Space 冲刺 · 打怪升级三选一 · 赚金币进工坊'), ROOM_W / 2, UIY(490));
+  cx.fillStyle = '#8a7a66'; cx.font = BIO ? '10px monospace' : '12px monospace';
+  cx.fillText(BIO ? (Touch.supported() ? '单指移动 · 自动射击 · 搜打撤：带物资活着撤离才算赚' : 'WASD 移动 · 自动射击 · Space 冲刺 · 活着撤离带走物资') : (Touch.supported() ? '左摇杆移动 · 右摇杆射击 · 打怪升级三选一 · 赚金币进工坊' : 'WASD 移动 · 方向键射击 · Space 冲刺 · 打怪升级三选一 · 赚金币进工坊'), ROOM_W / 2, BIO ? CANVAS_H - 12 : UIY(490)); // v5.1.1：BIO 提示下移贴画布底，不压账号按钮
   ctx.restore(); // 归还标题居中变换
   { // 账号入口按钮：画布绝对坐标绘制，与 acctBtnZone 命中区严格一致
     const z = acctBtnZone();
@@ -880,8 +1010,9 @@ function drawTitle() {
     cx.fillText('账号', z.x + z.w / 2, z.y + 21);
     cx.textAlign = 'left';
   }
-  cx.fillStyle = 'rgba(138,115,96,.55)'; cx.font = '10px monospace'; cx.textAlign = 'right';
-  cx.fillText(BUILD, CANVAS_W - 6, CANVAS_H - 6);
+  cx.fillStyle = 'rgba(138,115,96,.55)'; cx.font = '10px monospace';
+  if (BIO) { cx.textAlign = 'left'; cx.fillText(BUILD, 6, CANVAS_H - 6); } // v5.1.1 复核P2：水印移左下，不与底部操作提示叠字
+  else { cx.textAlign = 'right'; cx.fillText(BUILD, CANVAS_W - 6, CANVAS_H - 6); }
   // v4.0 账号状态条（右上，点击改昵称）
   const m1 = Meta.load();
   const az = accountZone();
@@ -958,7 +1089,7 @@ function doGacha(n) {
   if (!r) { SFX.play('deny'); game.gachaResult = { fail: true, n, t: 360 }; return; }
   game.gachaResult = Object.assign({ n, t: 600 }, r);
 }
-const RAR_C = { SSR: '#f2c45e', SR: '#b093e8', R: '#8ecbff' };
+const RAR_C = { SSR: '#b093e8', SR: '#7fb2e8', R: '#7fae5a', null: '#cfc6b8' }; // v5.2 枪品四级色：白(制式/R下用绿)→绿→蓝→紫
 function drawArmoryPanel(cx, g) {
   cx.fillStyle = '#0a0806'; cx.fillRect(0, 0, CANVAS_W, CANVAS_H);
   const m = Meta.load();
@@ -1078,8 +1209,8 @@ function drawDeathScreen() {
       cx.strokeStyle = '#e8c85e'; cx.lineWidth = 2; cx.beginPath(); cx.roundRect(z.x, z.y, z.w, z.h, 8); cx.stroke();
       cx.fillStyle = '#ffe0c0'; cx.font = 'bold 17px monospace';
       cx.fillText('⟳ 再战第 ' + game.stage + ' 次远征', z.x + z.w / 2, z.y + 28); }
-    cx.fillStyle = '#e0d0b8'; cx.font = '13px monospace';
-    cx.fillText('点按钮再战 · 点工坊强化 · Esc 回基地', ROOM_W / 2, UIY(490) + 24);
+    cx.fillStyle = '#e0d0b8'; cx.font = '11px monospace';
+    cx.fillText('点按钮再战 · 点工坊强化 · Esc 回基地', ROOM_W / 2, CANVAS_H - 14); // v5.1.1：贴画布底，不被裁半
     cx.textAlign = 'left'; cx.restore(); return;
   }
   cx.fillStyle = '#c4303a'; cx.font = 'bold 58px monospace'; cx.textAlign = 'center';
@@ -1140,11 +1271,11 @@ function drawExtractSettle() {
   const ty = y0 + 2 * ch + gap + 36;
   cx.font = 'bold 14px monospace';
   const rows = [
-    ['随身金币', game.runCoins || 0, '#e8c85e'],
+    ['随身金币', Math.round((game.runCoins || 0) * (game.diffCoin || 1)), '#e8c85e'], // v5.2 门禁P2：显示难度折后实收
     ['物资折算', game.lootVal || 0, '#7fae5a'],
     [`解救幸存者 ${game.saved || 0} 人`, game.savedVal || 0, '#8ecbff'],
   ];
-  if (game.bossKilled) rows.push(['远征通关奖', 300, '#b093e8']);
+  if (game.bossKilled) rows.push(['远征通关奖', Math.round(300 * (game.diffCoin || 1)), '#b093e8']); // v5.1.1：显示难度折后实收
   rows.forEach(([k, v, c], i) => {
     cx.textAlign = 'left'; cx.fillStyle = '#a8937c';
     cx.fillText(k, ROOM_W / 2 - 150, ty + i * 24);
@@ -1152,7 +1283,18 @@ function drawExtractSettle() {
     cx.fillText('+' + v, ROOM_W / 2 + 150, ty + i * 24);
   });
   cx.textAlign = 'center'; cx.fillStyle = '#ffe0c0'; cx.font = 'bold 18px monospace';
-  cx.fillText(`总入账 ${game.runBanked || 0} 金币`, ROOM_W / 2, ty + rows.length * 24 + 16);
+  cx.fillText(`总入账 ${game.runBanked || 0} 金币${game.hopeless ? '（绝望逃跑 ×0.6）' : ''}`, ROOM_W / 2, ty + rows.length * 24 + 16);
+  { // 文档 7.1：积分与评级印章（v5.1.1 P1：右移到明细列之外，不压数字）
+    const sc = game.score || 0;
+    const grade = sc >= 1200 ? 'S' : sc >= 800 ? 'A' : sc >= 450 ? 'B' : 'C';
+    const gc = { S: '#e8c85e', A: '#b093e8', B: '#8ecbff', C: '#8a7a66' }[grade];
+    cx.save(); cx.translate(Math.min(CANVAS_W - 42, ROOM_W / 2 + 210), ty + 30); cx.rotate(-.22);
+    cx.strokeStyle = gc; cx.lineWidth = 3; cx.globalAlpha = .9;
+    cx.beginPath(); cx.arc(0, 0, 30, 0, TAU); cx.stroke();
+    cx.fillStyle = gc; cx.font = 'bold 34px monospace'; cx.fillText(grade, 0, 12);
+    cx.font = '9px monospace'; cx.fillText(`积分 ${sc}`, 0, 44);
+    cx.restore(); cx.globalAlpha = 1;
+  }
   cx.fillStyle = '#8a7a66'; cx.font = '11px monospace';
   cx.fillText(`最深推进：实验室 ${Meta.load().bioBest || game.roomNum} · 累计成功撤离 ${Meta.load().bioEscapes || 0} 次`, ROOM_W / 2, ty - 18);
   drawWorkshopBtn(cx, game);

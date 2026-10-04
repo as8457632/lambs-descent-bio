@@ -58,14 +58,21 @@ const CloudSave = {
       return true;
     } catch (e) { this.online = false; return false; } // 离线照常本地玩
   },
-  applyProfile(p) { // 增量基线=服务器金币；本地取 max(本地, 云端+积压)（换设备找回进度）
+  applyProfile(p) { // v5.1.1：经济(金币/材料)按 econRev last-writer-wins 拉取，不再 max(本地, 云+pending)（消费防复活/防双计）
     const m = Meta.load();
-    let q = [];
-    try { q = JSON.parse(localStorage.getItem('tr_sync_q') || '[]'); } catch (e) { }
-    const pending = q.reduce((s, x) => s + (x.coinsDelta || 0), 0);
-    m.coins = Math.max(m.coins || 0, (p.coins || 0) + pending);
+    const crev = Math.floor(+p.econRev || 0);
+    if (crev > (m.econRev || 0)) {
+      m.coins = Math.max(0, Math.floor(+p.coins || 0));
+      if (p.mats && typeof p.mats === 'object') { m.mats.iron = Math.min(999, Math.max(0, p.mats.iron | 0)); m.mats.core = Math.min(999, Math.max(0, p.mats.core | 0)); }
+      m.econRev = crev;
+    }
+    Meta.syncFp(); // 拉取引起的数值变化不是本地新改动，不 bump rev
     m.maxStage = Math.max(m.maxStage || 0, p.maxStage || 0);
     m.bioBest = Math.max(m.bioBest || 0, Math.min(999, p.bioBest || 0)); m.bioEscapes = Math.max(m.bioEscapes || 0, p.bioEscapes || 0);
+    if (p.heroes && typeof p.heroes === 'object') // 英雄解锁/突破阶：白名单 + [0,3] 钳制
+      for (const k of Object.keys(p.heroes)) {
+        if (CHARS.some(c => c.id === k)) m.heroes[k] = Math.max(m.heroes[k] || 0, Math.min(3, p.heroes[k] | 0));
+      }
     for (const k of Object.keys(m.up)) { // 白名单键 + 不超工坊上限：脏云端数据拉爆本地
       const def = META_UPS.find(u => u.id === k);
       m.up[k] = Math.min(def ? def.max : 0, Math.max(m.up[k], (p.upgrades || {})[k] || 0));
@@ -74,20 +81,18 @@ const CloudSave = {
       for (const k of Object.keys(p.weapons)) {
         if (typeof WEAPONS !== 'undefined' && WEAPONS[k]) m.weapons[k] = Math.max(m.weapons[k] || 0, Math.min(5, p.weapons[k] | 0));
       }
-    if (p.charId >= 0 && p.charId < 4) m.char = p.charId; // 钳制，防脏档崩渲染
+    if (p.wq && typeof p.wq === 'object') // v5.1.1 复核P2：武器品质跨设备找回（累进项 max 合并，[0,3] 钳制）
+      for (const k of Object.keys(p.wq)) {
+        if (typeof WEAPONS !== 'undefined' && WEAPONS[k]) m.wq[k] = Math.max(m.wq[k] || 0, Math.min(3, p.wq[k] | 0));
+      }
+    if (p.charId >= 0 && p.charId < CHARS.length) m.char = p.charId; // 钳制，防脏档崩渲染
     Meta.save();
-    try { localStorage.setItem('tr_last_sync', String(p.coins || 0)); } catch (e) { } // 基线=服务器值，本地未同步盈余下次增量上补
   },
-  snapshot() { // 金币用增量：消费真实上云，不会被 max 合并"复活"
+  snapshot() { // v5.1.1：经济改全量快照 + econRev LWW：消费/入账都真实覆盖云端，重登与积压重试都幂等
     const m = Meta.load();
-    const last = +(localStorage.getItem('tr_last_sync') || 0);
-    return { coinsDelta: m.coins - last, base: last, maxStage: m.maxStage, upgrades: m.up, weapons: m.weapons || null, charId: m.char, nickname: m.nickname || '', bioBest: m.bioBest || 0, bioEscapes: m.bioEscapes || 0 };
+    return { coins: m.coins, econRev: m.econRev || 0, maxStage: m.maxStage, upgrades: m.up, weapons: m.weapons || null, wq: m.wq || null, charId: m.char, nickname: m.nickname || '', bioBest: m.bioBest || 0, bioEscapes: m.bioEscapes || 0, mats: m.mats || null, heroes: m.heroes || null };
   },
-  markSynced() { try { localStorage.setItem('tr_last_sync', String(Meta.load().coins)); } catch (e) { } },
-  bumpSynced(delta) { // 基线只前进「已确认入账的增量」：在途期间的新增量不会被子虚吞掉（markSynced 全量对齐会丢）
-    try { localStorage.setItem('tr_last_sync', String(+(localStorage.getItem('tr_last_sync') || 0) + (delta || 0))); } catch (e) { }
-  },
-  async queue() { // 结算点调用：通关/死亡/撤离/工坊购买
+  async queue() { // 结算点调用：通关/死亡/撤离/工坊购买/合成
     const body = this.snapshot();
     if (!this.token) { this.pushQueue(body); return; }
     try {
@@ -96,23 +101,20 @@ const CloudSave = {
         body: JSON.stringify(body),
       });
       if (!r.ok) throw 0;
-      this.online = true; this.bumpSynced(body.coinsDelta);
+      this.online = true;
       this.flushQueue();
     } catch (e) { this.online = false; this.pushQueue(body); }
   },
-  pushQueue(body) { // v4.3 协议修复：积压条目共享同一 tr_last_sync 基线 → 只保留 1 条最新快照
-    // coinsDelta 取最新（含消费的累计增量）；关卡/升级/武器逐键 max。逐条叠加会凭空铸币（审计 P1）
+  pushQueue(body) { // 积压只保留 1 条最新快照：经济取 rev 更高者，累进项逐键 max
     try {
       let q = [];
       try { q = JSON.parse(localStorage.getItem('tr_sync_q') || '[]'); } catch (e) { }
       const old = q[0];
       const merged = old ? {
-        ...old, ...body,
-        coinsDelta: body.coinsDelta,
+        ...((old.econRev || 0) > (body.econRev || 0) ? { ...body, ...old } : { ...old, ...body }),
         maxStage: Math.max(old.maxStage || 0, body.maxStage || 0),
         upgrades: mergeMax(old.upgrades, body.upgrades),
         weapons: mergeMax(old.weapons, body.weapons),
-        charId: body.charId !== undefined ? body.charId : old.charId,
         nickname: body.nickname || old.nickname,
       } : body;
       localStorage.setItem('tr_sync_q', JSON.stringify([merged]));
@@ -122,8 +124,6 @@ const CloudSave = {
     if (!this.token) return;
     let q = [];
     try { q = JSON.parse(localStorage.getItem('tr_sync_q') || '[]'); } catch (e) { }
-    const curBase = +(localStorage.getItem('tr_last_sync') || 0);
-    while (q.length && q[0].base !== curBase) q.shift(); // 基线已换（登录重置/已入账）的旧快照直接作废，防跨账号重复入账
     while (q.length) {
       const head = q[0];
       try {
@@ -131,10 +131,9 @@ const CloudSave = {
           method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + this.token },
           body: JSON.stringify(head),
         });
-        if (!r.ok) throw 0;
+        if (!r.ok) { if (r.status === 400) q.shift(); break; } // 400=内容被服务端拒绝（刷币拦截），丢弃防堵队列
         q.shift();
         localStorage.setItem('tr_sync_q', JSON.stringify(q));
-        this.bumpSynced(head.coinsDelta);
       } catch (e) { break; } // 仍离线，留队下次
     }
   },

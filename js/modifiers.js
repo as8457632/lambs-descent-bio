@@ -77,7 +77,7 @@ function modWorldTick(p) {
   game.lavaT = ((game.time || 0) % 240);
   if (game.mod === 'lava' && game.lavaT < 90) {
     if (p.moving) p.stillT = 0; else p.stillT = (p.stillT || 0) + 1;
-    if (p.stillT === (BIO ? 40 : 25)) { p.stillT = 0; p.hurt(1, game, undefined, undefined, '熔岩脉冲'); } // 竖屏自动战斗站桩是常态，阈值放宽
+    if (p.stillT === (BIO ? 40 : 25)) { p.stillT = 0; p.hurt(6, game, undefined, undefined, '熔岩脉冲'); } // 竖屏自动战斗站桩是常态，阈值放宽
   } else if (p.stillT) p.stillT = 0;
 }
 
