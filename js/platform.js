@@ -9,20 +9,20 @@ function mergeMax(a, b) { // 逐键取大的合并（离线积压快照合并 / 
   for (const k of Object.keys(b || {})) o[k] = Math.max(+o[k] || 0, +b[k] || 0);
   return o;
 }
-// ── 云存档后端地址解析（v5.3 登录接线）──
-// 生产 API 域（nginx 反代 → 内网 28989，TLS 在 nginx 终结）
-const PROD_API = 'https://lambs.znseed.top';
-// 优先级：URL ?api= > 账号面板手动设置(localStorage) > 页面协议
-//   file: → 空（本地双击打开：纯本地存档，不联网）；其余一律生产 API 域（游戏静态在 Pages/EdgeOne，与 API 本就不同源）
-// 旧实现直接取 location.origin，导致游戏一上 https 就去请求"游戏自己的域/api/login"→404→静默退回本地档
-function resolveApi(protocol, search, stored) {
+// ── 云存档后端地址（v5.3 同源部署）──
+// 游戏静态与 API 由同一进程同域名发出（server/api.js 既处理 /api/* 也发 index.html/js/art），
+// 所以默认值就是"同源"：同源请求既不走跨域，也不触发 Chrome PNA
+//（此前 API 单独放私网域名时，公网 Pages 页面调它被硬拦："access the `local` address space"，
+//  服务端加 Access-Control-Allow-Private-Network 也无效）。
+// 优先级：URL ?api= > 账号面板手动设置(localStorage) > 同源；file:// 双击本地打开 = 纯本地档不联网
+function resolveApi(protocol, origin, search, stored) {
   const q = (search.match(/[?&]api=([^&]+)/) || [])[1];
   if (q) return decodeURIComponent(q).replace(/\/+$/, '');
   if (stored) return stored.replace(/\/+$/, '');
-  return protocol === 'file:' ? '' : PROD_API;
+  return protocol === 'file:' ? '' : origin;
 }
 const CloudSave = {
-  api: resolveApi(location.protocol, location.search, localStorage.getItem('tr_api')),
+  api: resolveApi(location.protocol, location.origin, location.search, localStorage.getItem('tr_api')),
   token: localStorage.getItem('tr_token') || null,
   profile: null,
   online: false,
