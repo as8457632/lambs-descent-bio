@@ -18,7 +18,7 @@ const game = {
 function shake(n) { game.shakeAmt = Math.max(game.shakeAmt, n); }
 
 let cv, cx;
-const BUILD = 'v5.2-bio'; // 版本号水印：bio-mode 分支（生化地下城复刻）
+const BUILD = 'v5.3-bio'; // 版本号水印：bio-mode 分支（生化地下城复刻）
 window.__BUILD = BUILD;
 window.DBG_VP = () => ({ build: BUILD, inner: [innerWidth, innerHeight], vv: window.visualViewport ? [Math.round(visualViewport.width), Math.round(visualViewport.height)] : null, dpr: devicePixelRatio, css: [Math.round(cv ? cv.getBoundingClientRect().width : 0), Math.round(cv ? cv.getBoundingClientRect().height : 0)] });
 
@@ -127,6 +127,7 @@ function newRun(stage = 1, floor = 1) { // floor>1：死亡续爬（从倒下那
   p.ammo = p.clipMax(); p.reloadT = 0; // v5.2 弹药：开局按初始枪压满弹匣
   p.speed += .15 * m.up.spd;
   p.dashCdMax = Math.max(24, p.dashCdMax - 10 * m.up.dash);
+  p.dashBase = p.dashCdMax; // v5.3 疾风核心家族按开局基准重算，避免覆盖工坊 dash 加成
   game.reviveAvail = m.up.revive > 0;
   game.runCoins = 0; game.runEarned = 0; game.levelUps = 0; game.levelChoices = null; game.settled = false; game.wcheck = null;
   game.bag = []; game.saved = 0; game.roomNum = 1; game.extractMode = false; game.bossKilled = false; game.matCarry = { iron: 0, core: 0 }; // v5.0 搜打撤：背包/救人/深度 + v5.1 随身材料
@@ -136,29 +137,66 @@ function newRun(stage = 1, floor = 1) { // floor>1：死亡续爬（从倒下那
   loadFloor(floor);
   game.state = 'play'; game.paused = false; game.mapOpen = false;
   const z = zoneOf(stage);
-  game.hint = { text: isGate(stage) ? `⚑ 门槛关：怪物强化 ×1.45，Boss 获得词缀` : stage % 5 === 1 && z.rule ? `战区解锁：${z.name} —— ${z.rule}` : `第 ${stage} 关 · ${z.name} · ${game.theme.name}`, t: 260 };
+  game.hint = { text: isGate(stage) ? (BIO ? `⚑ 门槛关：精英更多，技能/宝箱品质上限 +1 档` : `⚑ 门槛关：怪物强化 ×1.45，Boss 获得词缀`) : stage % 5 === 1 && z.rule ? `战区解锁：${z.name} —— ${z.rule}` : `第 ${stage} 关 · ${z.name} · ${game.theme.name}`, t: 260 };
   BGM.start();
 }
 
-// ── v5.2.1 开箱选技能（制作人口径：杀怪不给经验；技能=清房开箱，池=当前所持枪）──
-game.openChestChoice = function () {
+// ── v5.3 开箱选技能（制作人口径：杀怪不给经验；技能=宝箱；家族×品质档，越高档越稀有且随关卡解锁）──
+// 品质档随关卡解锁：关1-2 封顶蓝，关3 紫，关4 橙，关5+ 红；门槛关/紫箱再 +1（封顶红）
+function qCapForStage(stage, purpleChest) {
+  const base = stage <= 2 ? 1 : stage === 3 ? 2 : stage === 4 ? 3 : 4;
+  return Math.min(4, base + (isGate(stage) ? 1 : 0) + (purpleChest ? 1 : 0));
+}
+const Q_WEIGHTS = [52, 28, 13, 5, 2]; // 档位越高越稀有（制作人："金色概率要低"）
+function rollQ(cap) {
+  let sum = 0;
+  for (let i = 0; i <= cap; i++) sum += Q_WEIGHTS[i];
+  let r = Math.random() * sum;
+  for (let i = 0; i <= cap; i++) { r -= Q_WEIGHTS[i]; if (r <= 0) return i; }
+  return cap;
+}
+// 本轮候选：家族卡=阶梯上可跳的更高档（受本关品质上限约束），机制卡=固定品阶且未满叠层上限
+function rollOfferings(p, cap) {
+  const gun = p.weapon.id, out = [];
+  for (const fam of Object.keys(FAM)) {
+    const f = FAM[fam];
+    if (f.scope === 'gun' && f.key === 'clip' && !WEAPONS[gun].clip) continue; // 近战没有弹匣概念
+    if (f.scope === 'gun' && f.key === 'rl' && WEAPONS[gun].melee) continue;    // 近战无换弹
+    const cur = famTierOf(p, fam, f.scope === 'gun' ? gun : null);
+    for (let t = cur + 1; t <= cap; t++) out.push(famCard(fam, t, f.scope === 'gun' ? gun : null, cur)); // 阶梯：可跳档，但跳到的档受本关品质上限约束
+  }
+  for (const u of UPGRADES) if (u.q <= cap && p.gunLvOf(u) < u.max && (!u.gun || u.gun === gun)) out.push(u);
+  return out;
+}
+game.openChestChoice = function (opts = {}) {
   const p = game.player;
-  const avail = u => p.gunLvOf(u) < u.max;
+  const cap = qCapForStage(game.stage || 1, opts.tier === 'purple');
+  game.levelCap = cap; // 三选一界面图例要显示"本关上限"（含紫箱加成），不能自己再算一遍
   const picks = [];
   const n = Math.random() < .5 ? 3 : 4; // 文档 4.1：每次呈现 3-4 个
-  if (BIO) { // v5.2.1：卡源=当前枪池 70% + 通用池 30%，品质加权保留
-    const gunPool = () => UPGRADES.filter(u => u.gun === p.weapon.id && avail(u) && !picks.includes(u));
-    const genPool = () => UPGRADES.filter(u => !u.gun && avail(u) && !picks.includes(u));
-    for (let i = 0; i < n; i++) {
-      let bag = Math.random() < .7 ? gunPool() : genPool();
-      if (!bag.length) bag = gunPool().concat(genPool());
-      if (!bag.length) break;
-      const r = Math.random(), want = r < .05 ? 'SSR' : r < .30 ? 'SR' : 'R';
-      let cand = bag.filter(u => (u.rar || 'R') === want);
-      if (!cand.length) cand = bag;
-      picks.push(choice(cand));
+  if (BIO) {
+    let bag = rollOfferings(p, cap);
+    for (let i = 0; i < n && bag.length; i++) {
+      const gunOnly = Math.random() < .7; // v5.2.1 口径保留：枪池 70% / 通用池 30%
+      let pool = bag.filter(o => gunOnly ? (o.gun === p.weapon.id) : !o.gun);
+      if (!pool.length) pool = bag;
+      const want = rollQ(cap);
+      let cand = pool.filter(o => o.q === want);
+      if (!cand.length) { // 回落：取与目标档差值最小的一张
+        const d0 = Math.min(...pool.map(o => Math.abs(o.q - want)));
+        cand = pool.filter(o => Math.abs(o.q - want) === d0);
+      }
+      const pick = choice(cand);
+      picks.push(pick);
+      bag = bag.filter(o => o !== pick && !(pick.isFam && o.isFam && o.fam === pick.fam && o.gun === pick.gun)); // 同族每轮只出一张
+    }
+    // 保底：一手全绿而本关允许更高档 → 随机一张提一档，避免"永远只见绿"
+    if (picks.length && cap > 0 && picks.every(o => o.q === 0)) {
+      const alt = rollOfferings(p, cap).filter(o => o.q > 0 && !picks.some(x => x.isFam && o.isFam && x.fam === o.fam));
+      if (alt.length) picks[0] = choice(alt);
     }
   } else {
+    const avail = u => p.gunLvOf(u) < u.max;
     const bag = UPGRADES.filter(u => avail(u)).slice();
     for (let i = 0; i < n && bag.length; i++) picks.push(bag.splice(Math.floor(Math.random() * bag.length), 1)[0]);
   }
@@ -173,26 +211,44 @@ game.openChestLoot = function (room, c) {
   SFX.play('clear');
   spawnParticles(room, c.x, c.y, 16, '#e8c85e', 3.2);
   const p = game.player;
+  if (room.type === 'start') { // 初始房宝箱：从账号武器库随机出 1 把武器（不开技能）
+    const wid = pickWeaponId(p) || bioAnyOwnedWeapon();
+    if (wid) {
+      const wp = new Pickup('weapon', c.x, c.y + 8, null, 0, wid);
+      room.pickups.push(wp);
+      game.fx.push({ type: 'dropbeam', x: wp.x, y: wp.y + 6, col: WEAPONS[wid].c, t: 90, t0: 90 });
+      game.toast = { item: { name: '初始武器：' + WEAPONS[wid].name, desc: '踩上去可查看并装备', color: WEAPONS[wid].c }, t: 170 };
+    } else game.toast = { item: { name: '武器库为空', desc: '去军械库抽一把再来', color: '#e8c85e' }, t: 170 };
+    return;
+  }
+  // v5.3 实物掉落表：护盾/无敌进宝箱，技能位与实物分离（每次开箱最多 1 次三选一）
+  // 每格按「归一化权重」取一种（旧版把独立概率当累计阈值用，导致紫箱药膏/材料/金币永不可达 —— 门禁 P0）
   const CFG = {
-    wood:   { n: randi(1, 2), coins: [4, 9],  weapon: .05, skill: .35, medkit: .35, mat: .25, col: '#c8a06a' },
-    blue:   { n: randi(2, 3), coins: [8, 15], weapon: .15, skill: .55, medkit: .45, mat: .40, col: '#7fb2e8' },
-    purple: { n: randi(3, 4), coins: [12, 22], weapon: .35, skill: .75, medkit: .50, mat: .60, col: '#b093e8' },
+    wood:   { n: randi(1, 2), coins: [4, 9],   w: { weapon: .03, skill: .20, shield: 0,   invul: 0,   medkit: .22, mat: .18, coin: .37 }, shP: 0,  iF: 0,   col: '#c8a06a' },
+    blue:   { n: randi(2, 3), coins: [8, 15],  w: { weapon: .10, skill: .26, shield: .08, invul: 0,   medkit: .20, mat: .16, coin: .20 }, shP: 45, iF: 0,   col: '#7fb2e8' },
+    purple: { n: randi(3, 4), coins: [12, 22], w: { weapon: .18, skill: .30, shield: .12, invul: .06, medkit: .14, mat: .12, coin: .08 }, shP: 70, iF: 360, col: '#b093e8' },
   }[c.tier || 'wood'];
+  let acc = 0;
+  const cuts = Object.keys(CFG.w).map(k => [k, acc += CFG.w[k] / Object.values(CFG.w).reduce((a, v) => a + v, 0)]);
   let gotSkill = false, weapons = 0, spawned = 0;
   const drop = o => { o.x = c.x + rand(-34, 34); o.y = c.y + rand(-8, 26); room.pickups.push(o); spawned++; };
   for (let i = 0; i < CFG.n; i++) {
     const r = Math.random();
-    if (r < CFG.weapon && weapons < 2) { // 开箱出武器：账号拥有池随机（参考原作紫光柱）
+    const hit = cuts.find(x => r < x[1]);
+    const kind = hit ? hit[0] : 'coin';
+    if (kind === 'weapon' && weapons < 2) { // 开箱出武器：账号拥有池随机（参考原作紫光柱）
       const wid = pickWeaponId(p) || bioAnyOwnedWeapon();
-      if (wid) { weapons++; const wp = new Pickup('weapon', 0, 0, null, 0, wid); drop(wp); game.fx.push({ type: 'dropbeam', x: wp.x, y: wp.y + 6, col: WEAPONS[wid].c, t: 90, t0: 90 }); }
+      if (wid) { weapons++; const wp = new Pickup('weapon', 0, 0, null, 0, wid); drop(wp); game.fx.push({ type: 'dropbeam', x: wp.x, y: wp.y + 6, col: qColor(gunTier(wid)), t: 90, t0: 90 }); }
       else for (let k = 0; k < 3; k++) drop(new Pickup('coin', 0, 0));
-    } else if (r < CFG.weapon + CFG.skill && !gotSkill) { gotSkill = true; } // 技能位：开完箱进三/四选一
-    else if (r < CFG.weapon + CFG.skill + CFG.medkit) drop(new Pickup('medkit', 0, 0));
-    else if (r < CFG.weapon + CFG.skill + CFG.medkit + CFG.mat) drop(new Pickup('mat', 0, 0, CRAFT_MATS[Math.random() < .6 ? 'iron' : 'core']));
+    } else if (kind === 'skill' && !gotSkill) { gotSkill = true; } // 技能位：开完箱进三/四选一
+    else if (kind === 'shield') drop(new Pickup('shield', 0, 0, { name: '护盾', power: CFG.shP }));
+    else if (kind === 'invul') drop(new Pickup('invul', 0, 0, { name: '应急无敌', frames: CFG.iF }));
+    else if (kind === 'medkit') drop(new Pickup('medkit', 0, 0));
+    else if (kind === 'mat') drop(new Pickup('mat', 0, 0, CRAFT_MATS[Math.random() < .6 ? 'iron' : 'core']));
     else for (let k = 0, cc = randi(CFG.coins[0], CFG.coins[1]); k < Math.min(cc, 10); k++) drop(new Pickup('coin', 0, 0)); // 金币成串喷出
   }
   if (spawned === 0 && !gotSkill) for (let k = 0; k < 4; k++) drop(new Pickup('coin', 0, 0)); // 空箱保底
-  if (gotSkill) game.openChestChoice(); // 技能=当前枪池三/四选一
+  if (gotSkill) game.openChestChoice({ tier: c.tier }); // 技能=家族阶梯三/四选一（紫箱品质档上限 +1）
   else game.toast = { item: { name: c.tier === 'purple' ? '紫箱开启！' : c.tier === 'blue' ? '蓝箱开启' : '宝箱开启', desc: '战利品已散落在地，去捡！', color: CFG.col }, t: 150 };
 };
 game.resolveWcheck = function (equip) { // v5.2.2 武器详情卡：装备 / 不换
@@ -202,19 +258,22 @@ game.resolveWcheck = function (equip) { // v5.2.2 武器详情卡：装备 / 不
   if (equip) wc.pk.takeWeapon(game.player);
   else { wc.pk.denyCd = 150; game.hint = { text: '已跳过，武器留在地上（走近可再选）', t: 100 }; }
 };
-game.applyUpgrade = function (u) { // v5.2：通用卡即时 apply；枪卡入 gunLv（切枪仍保留，只在持该枪时生效）
+game.applyUpgrade = function (u) { // v5.3：家族卡记录"当前档"（覆盖升档，不叠乘）；机制卡仍按 id 叠层
   const p = game.player;
-  if (u.gun) { (p.gunLv[u.gun] = p.gunLv[u.gun] || {})[u.id] = (p.gunLv[u.gun][u.id] || 0) + 1; if (u.apply) u.apply(p); }
+  if (u.isFam) {
+    const f = FAM[u.fam];
+    if (f.scope === 'gun') (p.gunLv[u.gun] = p.gunLv[u.gun] || {})['fam:' + u.fam] = u.tier + 1;
+    else { p.upLv['gen:' + u.fam] = u.tier + 1; f.set(p, f.vals[u.tier], u.prev < 0 ? 0 : f.vals[u.prev]); }
+  } else if (u.gun) { (p.gunLv[u.gun] = p.gunLv[u.gun] || {})[u.id] = (p.gunLv[u.gun][u.id] || 0) + 1; if (u.apply) u.apply(p); }
   else { p.upLv[u.id] = (p.upLv[u.id] || 0) + 1; u.apply(p); }
-  if (WEAPONS[p.weapon.id].clip) { const cm = p.clipMax(); if (p.ammo > cm) p.ammo = cm; } // 弹药上限卡即时生效时收敛
+  if (WEAPONS[p.weapon.id].clip) { const cm = p.clipMax(); if (p.ammo > cm) p.ammo = cm; } // 弹匣上限变化时收敛
 };
 game.pickUpgrade = function (i) {
   const u = game.levelChoices && game.levelChoices[i];
   if (!u) return;
-  const p = game.player;
   game.applyUpgrade(u);
   game.levelUps++;
-  game.toast = { item: { name: u.name, desc: u.desc, color: u.c }, t: 140 };
+  game.toast = { item: { name: `[${qName(u.q)}] ${u.name}${u.gun ? ' · ' + WEAPONS[u.gun].name : ''}`, desc: u.desc, color: qColor(u.q) }, t: 160 };
   game.levelChoices = null;
   game.state = 'play';
 };
@@ -243,11 +302,9 @@ function enterRoom(room, fromDir) {
     const [vx, vy] = DVEC[side];
     ex -= vx * TILE * 1.35; ey -= vy * TILE * 1.35;
   }
-  if (BIO) { // v5.1.1：倍率先于内容生成，首批刷怪必须吃到本房 N（门禁 P0-N1）
+  if (BIO) { // v5.3：血量尺度只随关卡（跨关不归零）；房间强度改由战力预算驱动
     game.roomNum = (room.dist || 0) + 1;
-    const N = game.roomNum, stg = (game.stage || 1) - 1;
-    game.statM = (game.diffHp || 1) * (1 + .25 * N) * (1 + .10 * stg);
-    game.atkM = (game.diffAtk || 1) * (1 + .2 * N) * (1 + .05 * stg);
+    game.statM = (game.diffHp || 1) * hpScale(game.stage || 1); // 难度倍率仍乘血（N1..N9），关卡倍率不再吃房内序号
   }
   createRoomContents(room, game.floorNum, ex, ey);
   modOnEnter(room); // 战区环境重掷（风向等）
@@ -260,7 +317,7 @@ function enterRoom(room, fromDir) {
   game.cam.y = clamp(ey - ROOM_H / 2, 0, WORLD_H - ROOM_H);
   game.player.q = []; game.player.dashing = 0; // 跨房不清位移会带进新房"幽灵冲刺" 
 
-  if (!room.cleared && room.enemies.length > 0) {
+  if (!room.cleared && (room.enemies.length > 0 || (room.spawnQueue || []).length > 0)) { // v5.3：预算房进房时还没有怪，按队列判定
     SFX.play('doorOpen');
     if (!game.taughtClear) { // 首次进战斗房的教学提示，一局只出现一次
       game.taughtClear = true;
@@ -338,7 +395,7 @@ function update() {
           const cell = z.cells.find(c => inZone(mt, c));
           if (cell) {
             const w = WEAPONS[cell.id], own = weaponOwned(cell.id);
-            game.toast = { item: { name: `${w.name}${w.rar ? ` [${w.rar}]` : ''}`, desc: own ? w.desc : '未解锁 —— 抽卡获得后局内才会掉落', color: own ? w.c : '#8a7560' }, t: 220 };
+            game.toast = { item: { name: `${w.name} [${qName(gunTier(cell.id))}]`, desc: own ? w.desc : '未解锁 —— 抽卡获得后局内才会掉落', color: own ? w.c : '#8a7560' }, t: 220 };
             SFX.play('shoot');
           } else game.acctTab = 'main';
         } else game.gachaResult = null;
@@ -363,6 +420,12 @@ function update() {
       } else if (key === 'server') {
         const u = prompt('账号服务器地址（留空=纯本地存档）', CloudSave.api || '');
         if (u !== null) { CloudSave.api = u.trim(); localStorage.setItem('tr_api', u.trim()); CloudSave.login().then(ok => { game.toast = { item: { name: ok ? '登录成功' : '连不上，本地继续玩', desc: ok ? `账号 #${CloudSave.profile.id} 已绑定` : '已保留本地存档', color: ok ? '#7fae5a' : '#c9a24a' }, t: 200 }; if (ok) CloudSave.queue(); }); }
+      } else if (key === 'ctrl') { // v5.3 用户反馈：摇杆左右手自定义
+        const mm = Meta.load();
+        mm.ctrlSide = mm.ctrlSide === 'right' ? 'left' : 'right';
+        Meta.save(); Touch.layoutButtons();
+        game.toast = { item: { name: `移动摇杆已切到${mm.ctrlSide === 'right' ? '右' : '左'}手`, desc: '摇杆区与冲刺/技能/背包键整组换位（本设备生效）', color: '#7fae5a' }, t: 220 };
+        SFX.play('coin');
       } else if (key === 'export') {
         prompt('复制存档码（换设备时在新设备导入）：', btoa(unescape(encodeURIComponent(JSON.stringify(Meta.load())))));
       } else if (key === 'import') {
@@ -404,7 +467,7 @@ function update() {
         if (mt && inZone(mt, craftBtnZone(i))) {
           const r = craftWeapon(wid);
           SFX.play(r === 'ok' ? 'item' : 'deny');
-          if (r === 'ok') game.toast = { item: { name: `${WEAPONS[wid].name} 升为${WQ_NAMES[Meta.load().wq[wid]]}`, desc: '品质 +15% 伤害并解锁词条', color: '#e8c85e' }, t: 180 };
+          if (r === 'ok') game.toast = { item: { name: `${WEAPONS[wid].name} 升为 ${qName(gunTier(wid))}`, desc: `强化 ${gunWq(wid)} 级 · 品质每档 +10% 伤害`, color: qColor(gunTier(wid)) }, t: 180 };
         }
       });
       Touch.tapped = false;
@@ -473,10 +536,13 @@ function update() {
     game.cam.y = lerp(game.cam.y, clamp(ty, 0, WORLD_H - vh), .16);
   }
 
-  // 配额制持续刷怪：没杀满就一直从边缘补怪；杀满后停止补刷，场上残敌必须亲手清光才开门
-  if (room.quota && !room.cleared && room.killed < room.quota) {
-    const aliveCap = BIO ? Math.min(22, 10 + (room.dist || 0) * 2) : Math.min(60, (IS_MOBILE ? 30 : 40) + Math.floor((game.stage - 1) / 10) * 2);
-    if (--room.spawnT <= 0 && room.enemies.length < aliveCap) waveSpawn(room, game.floorNum);
+  // v5.3 生化模式：预算队列 + 预警口渐进刷怪；桌面模式沿用配额补刷
+  if (!room.cleared) {
+    if (BIO) { if (room.spawnQueue) drainSpawnQueue(room, game.floorNum); }
+    else if (room.quota && room.killed < room.quota) {
+      const aliveCap = Math.min(60, (IS_MOBILE ? 30 : 40) + Math.floor((game.stage - 1) / 10) * 2);
+      if (--room.spawnT <= 0 && room.enemies.length < aliveCap) waveSpawn(room, game.floorNum);
+    }
   }
 
   for (const e of room.enemies) if (!e.dead) e.update(room);
@@ -496,8 +562,8 @@ function update() {
   room.tears = room.tears.filter(t => !t.dead);
   room.pickups = room.pickups.filter(k => !k.dead);
 
-  // 清房判定：有配额的房间必须杀满，波次间隙"假清空"不再开门
-  if (!room.cleared && room.enemies.length === 0 && (!room.boss || room.boss.dead)) {
+  // 清房判定：有配额的房间必须杀满；v5.3 队列/预警未清空前不算清房（防"进房 0 怪"瞬间误判开门）
+  if (!room.cleared && room.enemies.length === 0 && !(room.spawnQueue || []).length && !(room.spawnPending || []).length && (!room.boss || room.boss.dead)) {
     if ((room.hasEnemiesPlanned || room.boss) && (!room.quota || room.killed >= room.quota)) onRoomCleared(room);
   }
 
@@ -531,7 +597,7 @@ function handleCollisions(room) {
           if (tr.fuseT !== undefined) { // 罐罐雷贴身引爆：伤害只走 plop 的爆炸 AoE，不直伤+爆炸双算
             hit = true; break;
           }
-          e.hit(BIO && p.upLv.execute && e.stun > 0 ? tr.dmg * 1.5 : tr.dmg, room, tr.x, tr.y); // 处决协同对远程同样生效
+          e.hit(tr.dmg * execMul(p, e), room, tr.x, tr.y); // v5.3 处决直觉对远程同样生效（+15%）
           if (tr.burn && e.hp > 0) { e.burnT = Math.max(e.burnT || 0, 180); e.burnD = Math.max(e.burnD || 0, 3); } // v5.2 引燃弹：灼烧 3 秒
           game.fx.push({ type: 'spark', id: tr.spId || (tr.colorKey === 'spark' ? 'light' : 'tear'), x: tr.x, y: tr.y, ang: Math.atan2(-tr.vy, -tr.vx), r: tr.r + 5, t: 12, t0: 12 });
           tr.hits.push(e);
@@ -560,7 +626,7 @@ function handleCollisions(room) {
   for (const e of room.enemies) {
     if (!e.dead && e.spawnT <= 0 && dist2(e.x, e.y, p.x, p.y) < e.r + p.r * .75) {
       let dmg = BIO ? (e.elite ? 18 : 10) : Math.ceil(e.cfg.dmg * Math.sqrt(game.statM || 1)); // v5.2 门禁P0：承伤固定口径，难度压力由怪量/血量体现，不吃 atkM
-      if (BIO && e.cfg.id === 'bat' && e.state === 'air') dmg *= 2; // 文档：猎杀者冲刺命中伤×2
+      // v5.3 修正：血蝠空中 ×2 会破 10/18 固定口径（普通变 20、精英变 36），改为不加倍，压迫感由更快的刷怪节奏提供
       p.hurt(dmg, game, e.x, e.y, ((typeof themeMob === 'function' && themeMob(e.cfg.id) || {}).label || e.cfg.label) + (e.elite ? '·精英' : '')); // v5.2 主题怪名
       if (BIO && e.cfg.id === 'attackfly' && e.elite) { // 双头犬连咬：第 2 次接触附加 0.5s 眩晕
         e.bite = (e.bite || 0) + 1;
@@ -771,6 +837,7 @@ function draw() {
   drawRoom(cx, game.cur, pal, game.time);
   drawHazards(cx, game.cur, game.time); // v4.3 钉子/漩涡（地面之上、拾取物之下）
   if (BIO && game.state === 'play') drawBioArrows(cx, game.cur, game.time); // v5.1 单出口指引箭头
+  if (BIO) drawSpawnMarks(cx, game.cur, game.time); // v5.3 预警口：出怪前 0.75s 的地面警告圈
   for (const pk of game.cur.pickups) if (!pk.dead) drawPickup(cx, pk, game.time);
   for (const e of game.cur.enemies) drawEnemy(cx, e, game.time);
   if (game.cur.boss && !game.cur.boss.dead) drawBoss(cx, game.cur.boss, game.time);
@@ -806,7 +873,7 @@ function draw() {
       cx.fillStyle = '#d9a92e'; cx.fillRect(cxb - bw / 2 + 2, HUD_H - 14, (bw - 4) * (k / q), 8);
       cx.strokeStyle = 'rgba(217,169,46,.7)'; cx.lineWidth = 1; cx.strokeRect(cxb - bw / 2, HUD_H - 16, bw, 12);
       cx.fillStyle = '#f0e2c0'; cx.font = 'bold 10px monospace'; cx.textAlign = 'center';
-      cx.fillText(`第 ${game.roomNum} 区 · 歼灭 ${k}/${q} · 剩余 ${game.cur.enemies.length}`, cxb, HUD_H - 20);
+      cx.fillText(`第 ${game.roomNum} 区 · 歼灭 ${k}/${q} · 剩余 ${game.cur.enemies.length + (game.cur.spawnPending || []).length + (game.cur.spawnQueue || []).length}`, cxb, HUD_H - 20);
       const sec = Math.floor(game.runTime / 60);
       cx.textAlign = 'right'; cx.fillStyle = '#8a7a66'; cx.font = '10px monospace';
       cx.fillText(`${String(Math.floor(sec / 60)).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}`, VIEW_W - 10, 22); // v5.1.1：计时上移到右列顶端，与金币/积分/冲刺成纵列
@@ -828,7 +895,7 @@ function draw() {
       const gap = 10, x0 = VIEW_W / 2 - (cm - 1) * gap / 2, yy = HUD_H + 11;
       for (let i = 0; i < cm; i++) {
         cx.beginPath(); cx.arc(x0 + i * gap, yy, 3.6, 0, TAU);
-        cx.fillStyle = i < a ? (RAR_C[pw.rar] || '#cfc6b8') : 'rgba(110,100,90,.5)';
+        cx.fillStyle = i < a ? qColor(gunTier(pw.id)) : 'rgba(110,100,90,.5)'; // v5.3 弹丸点跟品质档（出身+强化）
         cx.fill();
       }
       cx.font = 'bold 9px monospace'; cx.textAlign = 'right'; cx.fillStyle = rl > 0 ? '#e8c85e' : '#8a7a66';
@@ -857,6 +924,7 @@ function draw() {
   if (game.state === 'levelup') drawLevelUp(cx, game);
   if (game.state === 'wcheck') drawWeaponCheck(cx, game);
   if (game.state === 'play' && game.mapOpen) drawFloorMap(cx, game);
+  drawItemToast(cx, game); // v5.3：toast 必须画在遮罩面板之后，否则被 .82 半透明压成灰字
 
   // 受击红闪
   if (game.flashT > 0) {
@@ -1067,7 +1135,8 @@ function drawAccountPanel(cx, g) {
     ['server', `服务器：${CloudSave.api || '（未设置 = 纯本地存档，点这里填写）'}`],
     ['export', '导出存档码（复制给新设备）'],
     ['import', '导入存档码（粘贴后自动重载）'],
-    ['armory', `军械库：已拥有 ${ownedN}/14 把 · 军械券×${m.gachaTickets || 0} —— 点这里抽枪`],
+    ['armory', `军械库：已拥有 ${ownedN}/${Object.keys(WEAPONS).length} 把 · 军械券×${m.gachaTickets || 0} —— 点这里抽枪`],
+    ['ctrl', `操作：移动摇杆在${m.ctrlSide === 'left' ? '左' : '右'}手 —— 点这里切换`],
     ['back', '返 回'],
   ];
   rows.forEach((r, i) => {
@@ -1102,13 +1171,12 @@ function drawPanelToast(cx) {
   cx.globalAlpha = 1;
 }
 
-// ── v4.3 军械库：抽卡解锁武器（SSR6%/SR28%/R66%，十连保 ≥1 SR，重复返 80 币）──
+// ── v4.3 军械库：抽卡解锁武器（出身档 橙6%/紫28%/蓝66%，十连保 ≥紫，重复返 80 币）──
 function doGacha(n) {
   const r = gachaPull(n);
   if (!r) { SFX.play('deny'); game.gachaResult = { fail: true, n, t: 360 }; return; }
   game.gachaResult = Object.assign({ n, t: 600 }, r);
 }
-const RAR_C = { SSR: '#b093e8', SR: '#7fb2e8', R: '#7fae5a', null: '#cfc6b8' }; // v5.2 枪品四级色：白(制式/R下用绿)→绿→蓝→紫
 function drawArmoryPanel(cx, g) {
   cx.fillStyle = '#0a0806'; cx.fillRect(0, 0, CANVAS_W, CANVAS_H);
   const m = Meta.load();
@@ -1132,9 +1200,10 @@ function drawArmoryPanel(cx, g) {
     cx.fillText(owned ? w.name : '？？？', c.x + 40, c.y + 22);
     cx.font = '10px monospace'; cx.fillStyle = owned ? '#a8937c' : '#7a6a54';
     cx.fillText(owned ? `历史 Lv${m.weapons[c.id] || 1}` : '抽卡解锁', c.x + 40, c.y + 37);
-    if (w.rar && w.rar !== 'R') { // 稀有度角标（R 太常见不打标）
-      cx.fillStyle = RAR_C[w.rar]; cx.font = 'bold 9px monospace'; cx.textAlign = 'right';
-      cx.fillText(w.rar, c.x + c.w - 6, c.y + 12);
+    const tq = gunTier(c.id); // v5.3 品质档角标：绿/蓝/紫/橙/红（绿=出身最低，不打标）
+    if (tq > 0) {
+      cx.fillStyle = qColor(tq); cx.font = 'bold 9px monospace'; cx.textAlign = 'right';
+      cx.fillText(qName(tq), c.x + c.w - 6, c.y + 12);
     }
     cx.textAlign = 'center';
     cx.restore();
@@ -1152,7 +1221,7 @@ function drawArmoryPanel(cx, g) {
   };
   const tenCost = Math.max(0, 1200 - 150 * Math.min(t, 10));
   btn(z.single, '单抽', t > 0 ? `券抵 150 · 免费（余${t}）` : '150 金币', t > 0 || m.coins >= 150);
-  btn(z.ten, '十连', tenCost === 1200 ? '1200 金币 · 必出SR+' : `${tenCost} 金币（${Math.min(t, 10)}券抵扣）· 必出SR+`, t > 0 || m.coins >= 1200);
+  btn(z.ten, '十连', tenCost === 1200 ? '1200 金币 · 必出紫档+' : `${tenCost} 金币（${Math.min(t, 10)}券抵扣）· 必出紫档+`, t > 0 || m.coins >= 1200);
   cx.fillStyle = '#8a7560'; cx.font = '12px monospace';
   cx.fillText('返 回', z.back.x + z.back.w / 2, z.back.y + 22);
   cx.strokeStyle = '#4a382a'; cx.lineWidth = 1.5;
@@ -1175,8 +1244,8 @@ function drawArmoryPanel(cx, g) {
         cx.fillText(head, CANVAS_W / 2 - 220, y390);
         let x = CANVAS_W / 2 - 220 + cx.measureText(head).width + 2;
         fresh.forEach((r, i) => {
-          const w = WEAPONS[r.id], seg = `${w.name}[${w.rar}]${i < fresh.length - 1 ? '、' : ''}`;
-          cx.fillStyle = RAR_C[w.rar] || '#cbb59a';
+          const w = WEAPONS[r.id], seg = `${w.name}[${qName(gunTier(r.id))}]${i < fresh.length - 1 ? '、' : ''}`;
+          cx.fillStyle = qColor(gunTier(r.id));
           if (x + cx.measureText(seg).width > CANVAS_W / 2 + 220) { x = CANVAS_W / 2 - 220; y390 += 22; }
           cx.fillText(seg, x, y390); x += cx.measureText(seg).width;
         });
@@ -1191,7 +1260,7 @@ function drawArmoryPanel(cx, g) {
     cx.globalAlpha = 1; cx.textAlign = 'left';
   } else {
     cx.fillStyle = '#5a4c42'; cx.font = '10px monospace';
-    cx.fillText('概率：SSR 6% · SR 28% · R 66%｜重复枪自动折算金币｜点枪格看介绍', CANVAS_W / 2, UIY(400));
+    cx.fillText('概率：橙 6% · 紫 28% · 蓝 66%（出身档，工坊可合成升档至红）｜重复枪折算金币', CANVAS_W / 2, UIY(400));
   }
   drawPanelToast(cx);
   cx.textAlign = 'left';

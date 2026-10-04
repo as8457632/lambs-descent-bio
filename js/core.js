@@ -189,8 +189,9 @@ const Meta = {
     if (!this.data.mats || typeof this.data.mats !== 'object') this.data.mats = { iron: 0, core: 0 };
     if (!this.data.heroes || typeof this.data.heroes !== 'object') this.data.heroes = {}; // {id: 突破阶 0-3}；空=未解锁（0 号英雄除外）
     if (!this.data.shards || typeof this.data.shards !== 'object') this.data.shards = {};
-    if (!this.data.wq || typeof this.data.wq !== 'object') this.data.wq = {};              // 武器品质：{id: 0普通..3传说}
+    if (!this.data.wq || typeof this.data.wq !== 'object') this.data.wq = {};              // 武器强化级：{id: 0..4}（v5.3 扩档，品质档=出身+强化）
     if (typeof this.data.bioDiff !== 'number') this.data.bioDiff = 0;
+    if (this.data.ctrlSide !== 'left') this.data.ctrlSide = 'right'; // 用户反馈：移动摇杆默认右手（右下）；设备本地项，不进 econ 指纹
     if (typeof this.data.econRev !== 'number') this.data.econRev = 0;
     return this.data;
   },
@@ -241,15 +242,22 @@ const Touch = {
   tapped: false, menuTap: null, // menuTap：菜单态（升级/工坊）消费的点选坐标
   startedInPlay: new Set(), // 按下时仍处于战斗的手指 id，抬手不触发菜单确认
   supported() { return 'ontouchstart' in window || navigator.maxTouchPoints > 0; },
+  // v5.3 用户反馈：摇杆左右可自定义（Meta.ctrlSide）；动作键整组让到摇杆对侧，避免右下被按钮占住
+  stickOwns(x) { return Meta.load().ctrlSide === 'right' ? x >= VIEW_W / 2 : x < VIEW_W / 2; },
+  ghostX() { return Meta.load().ctrlSide === 'right' ? VIEW_W - 110 : 110; },
+  layoutButtons() {
+    const flip = BIO && Meta.load().ctrlSide === 'right'; // 右手法：摇杆区=右半屏，按钮全部让到左半
+    this.btn = { x: flip ? 64 : VIEW_W - 70, y: CANVAS_H - 96, r: 38 };
+    this.skillBtns = BIO ? [{ id: 'dashstrike', x: flip ? 56 : VIEW_W - 46, y: CANVAS_H - (flip ? 188 : 168), r: 32 }] : [];
+    this.bagBtn = BIO ? { x: flip ? 152 : 44, y: CANVAS_H - (flip ? 52 : 96), r: 30 } : null;
+    this.pauseBtn = { x: VIEW_W - 36, y: HUD_H + 204, r: 20 };
+    this.muteBtn = { x: VIEW_W - 36, y: HUD_H + 164, r: 18 };
+    this.mapBtn = { x: VIEW_W - 36, y: HUD_H + 124, r: 18 };
+    this.sticks.move = this.sticks.aim = null; // 重排后旧触点锚点作废，防止摇杆跨布局残留
+  },
   init(cv) {
-    const btn = this.btn = { x: VIEW_W - 70, y: CANVAS_H - 96, r: 38 };
-    const pbtn = this.pauseBtn = { x: VIEW_W - 36, y: HUD_H + 204, r: 20 };
-    const mbtn = this.muteBtn = { x: VIEW_W - 36, y: HUD_H + 164, r: 18 };
-    const gbtn = this.mapBtn = { x: VIEW_W - 36, y: HUD_H + 124, r: 18 };
-    this.skillBtns = BIO ? [ // v5.2 技能表跟英雄：全员唯一主动槽=冲锋打击
-      { id: 'dashstrike', x: VIEW_W - 46, y: CANVAS_H - 168, r: 32 },
-    ] : [];
-    this.bagBtn = BIO ? { x: 44, y: CANVAS_H - 96, r: 30 } : null;
+    this.layoutButtons();
+    const { pbtn, mbtn, gbtn } = this; // 右侧竖排小按钮不随布局换位，可安全捕获
     const pts = e => {
       const r = cv.getBoundingClientRect();
       // v5.2 强制竖屏：rot 逆变换已删（不存在横屏旋转态）
@@ -282,9 +290,10 @@ const Touch = {
         }
         if (hitSkill) continue;
         // 冲刺键：战斗中常驻（不再按余弹吞触点）；其他状态照常生成摇杆消除死区
-        if (game.state === 'play' && game.player && game.player.dashCd <= 0 && Math.hypot(p.x - btn.x, p.y - btn.y) < btn.r + 10) { this.dashTap = true; continue; }
-        // 右侧属性面板区不生成摇杆（触屏隐藏侧栏时 VIEW_W=960 全屏可用）
-        const side = BIO ? 'move' : (p.x < VIEW_W / 2 ? 'move' : p.x < VIEW_W ? 'aim' : null);
+        const db = this.btn; // 实时读：ctrlSide 切换后按钮会换位
+        if (game.state === 'play' && game.player && game.player.dashCd <= 0 && Math.hypot(p.x - db.x, p.y - db.y) < db.r + 10) { this.dashTap = true; continue; }
+        // v5.3 摇杆只在指定半屏生成（另一侧留给动作键，避免误触拖出摇杆）
+        const side = BIO ? (this.stickOwns(p.x) ? 'move' : null) : (p.x < VIEW_W / 2 ? 'move' : p.x < VIEW_W ? 'aim' : null);
         if (side && !this.sticks[side]) this.sticks[side] = { id: p.id, ox: p.x, oy: p.y, x: p.x, y: p.y };
       }
     }, { passive: false });
@@ -327,8 +336,8 @@ const Touch = {
       for (const p of pts(e)) for (const s of ['move', 'aim']) {
         const st = this.sticks[s];
         if (!st || st.id !== p.id) continue;
-        // 抬起的主指 → 移交给了同侧还按着的指头，避免双指操作断流
-        const heir = alive.find(a => a.id !== p.id && (s === 'move' ? a.x < VIEW_W / 2 : (a.x >= VIEW_W / 2 && a.x < VIEW_W)) &&
+        // 抬起的主指 → 移交给了同侧还按着的指头，避免双指操作断流（同侧口径与生成摇杆一致）
+        const heir = alive.find(a => a.id !== p.id && (s === 'move' ? (BIO ? this.stickOwns(a.x) : a.x < VIEW_W / 2) : (a.x >= VIEW_W / 2 && a.x < VIEW_W)) &&
           !Object.values(this.sticks).some(v => v && v.id === a.id));
         this.sticks[s] = heir ? { id: heir.id, ox: heir.x, oy: heir.y, x: heir.x, y: heir.y } : null;
       }

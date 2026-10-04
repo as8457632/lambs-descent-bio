@@ -81,9 +81,9 @@ const CloudSave = {
       for (const k of Object.keys(p.weapons)) {
         if (typeof WEAPONS !== 'undefined' && WEAPONS[k]) m.weapons[k] = Math.max(m.weapons[k] || 0, Math.min(5, p.weapons[k] | 0));
       }
-    if (p.wq && typeof p.wq === 'object') // v5.1.1 复核P2：武器品质跨设备找回（累进项 max 合并，[0,3] 钳制）
+    if (p.wq && typeof p.wq === 'object') // v5.1.1 复核P2：武器强化级跨设备找回（累进项 max 合并）；v5.3 品质扩档 → [0,4] 钳制
       for (const k of Object.keys(p.wq)) {
-        if (typeof WEAPONS !== 'undefined' && WEAPONS[k]) m.wq[k] = Math.max(m.wq[k] || 0, Math.min(3, p.wq[k] | 0));
+        if (typeof WEAPONS !== 'undefined' && WEAPONS[k]) m.wq[k] = Math.max(m.wq[k] || 0, Math.min(4, p.wq[k] | 0));
       }
     if (p.charId >= 0 && p.charId < CHARS.length) m.char = p.charId; // 钳制，防脏档崩渲染
     Meta.save();

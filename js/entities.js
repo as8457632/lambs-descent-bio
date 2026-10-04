@@ -3,6 +3,28 @@
 // 实体：玩家 / 弹道 / 敌人 / Boss / 掉落 / 道具
 // ─────────────────────────────────────────────
 
+// ── v5.3 用户反馈：品质统一 5 档 绿/蓝/紫/橙/红（技能卡与武器共用同一配色与词表）──
+const RARITY5 = [
+  { n: '绿', c: '#7fae5a' },
+  { n: '蓝', c: '#4a9edb' },
+  { n: '紫', c: '#b093e8' },
+  { n: '橙', c: '#f0973a' },
+  { n: '红', c: '#e04a4a' },
+];
+const qClamp = q => Math.max(0, Math.min(4, q | 0));
+const qName = q => RARITY5[qClamp(q)].n;
+const qColor = q => RARITY5[qClamp(q)].c;
+// v5.3 处决直觉：+50% 收敛到 +15%，并扩展到残血目标（不再只吃控制链）
+const execMul = (p, e) => (p.upLv && p.upLv.execute && (e.stun > 0 || e.hp <= e.maxHp * .25)) ? 1.15 : 1;
+// 枪出身档（抽卡稀有度 → 品质基档）；强化级 wq 在其上叠加，合起来才是玩家看到的品质档
+const GUN_BASE_TIER = { null: 0, R: 1, SR: 2, SSR: 3 };
+const WQ_MAX = 4; // 强化上限 0..4（v5.3 由 0..3 扩档）
+function gunWq(id) { return Math.min(WQ_MAX, ((Meta.load().wq || {})[id]) | 0); }
+function gunTier(id) {
+  const w = WEAPONS[id]; if (!w) return 0;
+  return qClamp((GUN_BASE_TIER[String(w.rar || 'null')] || 0) + gunWq(id));
+}
+
 function hitWall(room, x, y, r) {
   for (const [ox, oy] of [[-r, -r], [r, -r], [-r, r], [r, r], [0, -r], [0, r], [-r, 0], [r, 0]]) {
     if (room.solidTile(Math.floor((x + ox) / TILE), Math.floor((y + oy) / TILE))) return true;
@@ -234,41 +256,72 @@ function nearestEnemy(room, x, y) {
   return best;
 }
 
-// ── 局内升级三选一卡池（可叠加，带等级上限）──
+// ── v5.3 技能重做（用户反馈：品质要说清楚、同名技能按档递增、别一上手就毕业）──
+// 两类卡：
+//  ①「家族卡」= 同族同名，数值随品质档严格递增，持有 = 当前档（覆盖升档，不叠乘）
+//  ②「机制卡」= 给一个新行为，固定品阶 + 少量叠层上限（保留各处 gl(id) 特判钩子）
+const FAM = {
+  // —— 枪械家族（仅当前枪生效）——
+  dmgFloor: { scope: 'gun', name: '弹头精修', glyph: '精', cat: 'atk', key: 'dmgFlat',
+    vals: [2, 3, 5, 7, 10], fmt: v => `单发伤害不低于 +${v} 点` },
+  rng: { scope: 'gun', name: '射程', glyph: '弦', cat: 'atk', key: 'rng',
+    vals: [.04, .07, .10, .13, .17], fmt: v => `射程 +${Math.round(v * 100)}%` },
+  rl: { scope: 'gun', name: '装填', glyph: '填', cat: 'res', key: 'rl',
+    vals: [.06, .09, .12, .16, .20], fmt: v => `换弹时间 -${Math.round(v * 100)}%` },
+  clip: { scope: 'gun', name: '弹匣', glyph: '匣', cat: 'res', key: 'clip',
+    vals: [1, 2, 3, 4, 5], fmt: (v, gun) => { const c = (WEAPONS[gun] || {}).clip || 0; return c ? `弹匣 ${c} → ${c + v} 发` : `弹匣 +${v} 发`; } },
+  cd: { scope: 'gun', name: '射速', glyph: '速', cat: 'atk', key: 'cd',
+    vals: [.03, .05, .08, .11, .15], fmt: v => `出手间隔 -${Math.round(v * 100)}%` },
+  // —— 通用家族 ——
+  spd: { scope: 'gen', name: '疾行靴', glyph: '行', cat: 'surv', key: 'spd',
+    vals: [.02, .035, .05, .07, .09], fmt: v => `移动速度 +${Math.round(v * 1000) / 10}%`,
+    set(p, v, prev) { p.speed += (v - prev) * 3.0; } }, // 相对初始速度 3.0 取差值，覆盖升档不重复加成
+  hp: { scope: 'gen', name: '生之心', glyph: '生', cat: 'surv', key: 'hp',
+    vals: [8, 12, 16, 22, 30], fmt: v => `生命上限 +${v} 并回复 ${v}`,
+    set(p, v, prev) { p.maxHp += v - prev; p.heal(v - prev); } },
+  grab: { scope: 'gen', name: '贪婪磁石', glyph: '贪', cat: 'res', key: 'grab',
+    vals: [15, 25, 35, 50, 70], fmt: v => `拾取范围 +${v}`,
+    set(p, v, prev) { p.pickupMag += v - prev; } },
+  dash: { scope: 'gen', name: '疾风核心', glyph: '风', cat: 'surv', key: 'dash',
+    vals: [.06, .10, .14, .18, .24], fmt: v => `冲刺冷却 -${Math.round(v * 100)}%`,
+    set(p, v) { p.dashCdMax = Math.max(24, Math.round((p.dashBase || 70) * (1 - v))); } }, // 以开局基准 dashBase 重算，不吞工坊 dash 加成
+  leech: { scope: 'gen', name: '嗜血回复', glyph: '嗜', cat: 'res', key: 'leech',
+    vals: [12, 16, 20, 26, 32], fmt: v => `每击杀 12 只回复 ${v} 生命`,
+    set(p, v) { p.bloodHeal = v; } },
+  slow: { scope: 'gen', name: '减速力场', glyph: '滞', cat: 'ctrl', key: 'slow',
+    vals: [.15, .22, .30, .38, .45], fmt: v => `120 圈内敌人移速 -${Math.round(v * 100)}%`,
+    set(p, v) { p.slowPct = v; } },
+};
+const FAM_QN = 5; // 每族 5 档（绿蓝紫橙红）
+function famTierOf(p, fam, gunId) { // 当前持有档（0..4），-1 = 未持有
+  const f = FAM[fam];
+  const raw = f.scope === 'gun' ? ((p.gunLv || {})[gunId] || {})['fam:' + fam] : p.upLv['gen:' + fam];
+  return (raw | 0) - 1;
+}
+function famValue(fam, tier, gunId) { return tier < 0 ? 0 : FAM[fam].vals[tier]; }
+// 造一张具体的家族卡（tier = 本次提供的档位，prev = 已持有档位）
+function famCard(fam, tier, gunId, prev) {
+  const f = FAM[fam];
+  return {
+    id: (gunId ? gunId : 'gen') + ':' + fam + '@' + tier, fam, gun: gunId || null,
+    name: f.name, desc: f.fmt(f.vals[tier], gunId), cat: f.cat, glyph: f.glyph,
+    q: tier, isFam: true, tier, prev, max: 1, c: qColor(tier),
+  };
+}
+// 可叠层的机制卡（通用池）：追踪类已下架（自动索敌本就是常态），伤害/射程交给家族
 const UPGRADES = [
-  { id: 'spread',  name: '散弹之芯', desc: '弹数 +1（每发伤害 -10%）', max: 3, c: '#e8a83a', glyph: '散', cat: 'atk', rar: 'R',
-    apply(p) { p.shotsPerDir++; p.dmg *= .9; } },
-  { id: 'dmg',     name: '空尖弹', desc: '伤害 +15%', max: 5, c: '#c94a4a', glyph: '刃', cat: 'atk', rar: 'R',
-    apply(p) { p.dmg *= 1.15; } },
-  { id: 'rate',    name: '急促呼吸', desc: '射击间隔 -2 帧', max: 4, c: '#8ecbff', glyph: '急', cat: 'atk', rar: 'R',
-    apply(p) { p.fireDelay = Math.max(5, p.fireDelay - 2); } },
-  { id: 'boots',   name: '鼠捷之靴', desc: '移动速度 +0.3', max: 3, c: '#7fae5a', glyph: '捷', cat: 'surv', rar: 'R',
-    apply(p) { p.speed += .3; } },
-  { id: 'pierce',  name: '贯穿之刺', desc: '子弹穿透 +1 个敌人', max: 2, c: '#b8c4cc', glyph: '穿', cat: 'atk', rar: 'R',
-    apply(p) { p.pierce++; } },
-  { id: 'homing',  name: '磁引之核', desc: '眼泪追踪敌人', max: 1, c: '#7f7fe8', glyph: '磁', cat: 'atk', rar: 'SR',
-    apply(p) { p.homing = true; } },
-  { id: 'vital',   name: '生之心', desc: '生命上限 +20 并回满 20', max: 3, c: '#c4303a', glyph: '生', cat: 'surv', rar: 'R',
-    apply(p) { p.maxHp += 20; p.heal(20); } },
-  { id: 'vacuum',  name: '贪婪磁石', desc: '拾取范围 +45', max: 2, c: '#d9a92e', glyph: '贪', cat: 'res', rar: 'R',
-    apply(p) { p.pickupMag += 45; } },
-  { id: 'dashcd',  name: '疾风核心', desc: '冲刺冷却 -18%', max: 3, c: '#7fb2e8', glyph: '风', cat: 'surv', rar: 'R',
-    apply(p) { p.dashCdMax = Math.max(24, Math.round(p.dashCdMax * .82)); } },
-  { id: 'longer',  name: '长歌之弦', desc: '射程 +20%', max: 2, c: '#b093e8', glyph: '弦', cat: 'atk', rar: 'R',
-    apply(p) { p.tearLife = Math.round(p.tearLife * 1.2); } },
-  { id: 'maint',   name: '枪械保养', desc: '当前枪等级 +1（伤害地板随级成长）', max: 4, c: '#d9a92e', glyph: '养', cat: 'res', rar: 'SR',
+  { id: 'maint', name: '枪械保养', desc: '当前枪等级 +1（伤害地板随级成长）', max: 4, c: '#d9a92e', glyph: '养', cat: 'res', q: 1,
     apply(p) { p.weapon.lvl = Math.min(WEAPONS[p.weapon.id].max, p.weapon.lvl + 1); if (WEAPONS[p.weapon.id].clip) p.ammo = Math.min(p.clipMax(), p.ammo + 1); } }, // v5.2 门禁P2：枪不再掉落后的等级成长通道
-  // v5.1 文档 4.2 四方向补全：控制/生存/资源 + 紫卡协同（v5.2：护盾卡删除——护盾将做成武器；血约半心删除）
-  { id: 'slowfield', name: '减速力场', desc: '120 圈内敌人移速 -40%', max: 1, c: '#6ab0d8', glyph: '滞', cat: 'ctrl', rar: 'SR',
-    apply(p) { p.upLv.slowfield = 1; } },
-  { id: 'bloodlust', name: '嗜血回复', desc: '每击杀 8 只回复 20 生命', max: 2, c: '#c96a4a', glyph: '嗜', cat: 'res', rar: 'SR',
-    apply(p) { p.bloodNeed = Math.max(5, (p.bloodNeed || 8) - 3); } },
-  { id: 'thorns',    name: '荆棘反伤', desc: '受接触伤害时反弹 2 点', max: 2, c: '#7d9c6a', glyph: '荆', cat: 'surv', rar: 'SR',
+  { id: 'thorns', name: '荆棘反伤', desc: '受接触伤害时反弹 2 点', max: 1, c: '#7d9c6a', glyph: '荆', cat: 'surv', q: 1,
     apply(p) { p.upLv.thorns = (p.upLv.thorns || 0) + 1; } },
-  { id: 'execute',   name: '处决直觉', desc: '对眩晕/麻痹敌人伤害 +50%', max: 1, c: '#c4303a', glyph: '处', cat: 'atk', rar: 'SSR',
+  { id: 'execute', name: '处决直觉', desc: '对眩晕/麻痹或残血(<25%)敌人伤害 +15%', max: 1, c: '#c4303a', glyph: '处', cat: 'atk', q: 2,
     apply(p) { p.upLv.execute = 1; } },
-  { id: 'adrenaline', name: '肾上腺素', desc: '击杀后 2 秒移速 +30%', max: 1, c: '#e8a83a', glyph: '肾', cat: 'res', rar: 'SSR',
+  { id: 'adrenaline', name: '肾上腺素', desc: '击杀后 2 秒移速 +10%', max: 1, c: '#e8a83a', glyph: '肾', cat: 'res', q: 3,
     apply(p) { p.upLv.adrenaline = 1; } },
+  { id: 'pierce', name: '贯穿之刺', desc: '子弹穿透 +1 个敌人', max: 2, c: '#b8c4cc', glyph: '穿', cat: 'atk', q: 2,
+    apply(p) { p.pierce++; } }, // v5.3：紫档起才出现，全局硬上限 2
+  { id: 'spread', name: '散弹之芯', desc: '弹数 +1（每发伤害 -18%）', max: 1, c: '#e8a83a', glyph: '散', cat: 'atk', q: 3,
+    apply(p) { p.shotsPerDir++; p.dmg *= .82; } }, // v5.3：橙档稀有，代价同步加重
 ];
 
 // ── 玩家：移动 / 瞄准 / 射击 / 经验 ──
@@ -277,14 +330,15 @@ class Player {
     this.x = x; this.y = y; this.r = 15;
     this.speed = 3.0; this.dmg = 3.2; this.tearSpeed = 6.6; this.tearR = 6.5;
     this.fireDelay = 13; this.tearLife = 80;
-    this.hp = 100; this.maxHp = 100; // v5.2 数字血条：英雄品级定上限（newRun 里按 CHARS.hp 覆写）
+    this.hp = 100; this.maxHp = 100; this.shield = 0; // v5.2 数字血条：英雄品级定上限（newRun 里按 CHARS.hp 覆写）；v5.3 护盾为独立吸收池
     // v4.0 单货币：钱包即账户余额（Meta.coins），代理保持旧代码 p.coins++ 全兼容
     Object.defineProperty(this, 'coins', {
       get() { return Meta.load().coins; },
       set(v) { const d = Meta.load(); d.coins = v; Meta.save(); },
     });
     this.dashCd = 0; this.dashCdMax = 70; this.dashing = 0; this.dashVx = 0; this.dashVy = 0;
-    this.homing = false; this.shotsPerDir = 1; this.pickupMag = 24; this.bloodNeed = 8; this.bloodCnt = 0; this.adrT = 0;
+    this.homing = false; this.shotsPerDir = 1; this.pickupMag = 24;
+    this.bloodNeed = 12; this.bloodCnt = 0; this.bloodHeal = 0; this.adrT = 0; this.slowPct = 0; // v5.3 家族卡驱动：嗜血回复/减速力场
     this.pierce = 0;
     this.weapon = { id: 'tear', lvl: 1 };
     this.ammo = 0; this.reloadT = 0; // v5.2 弹药：打空自动换弹（近战无弹匣）
@@ -300,6 +354,13 @@ class Player {
   }
   hurt(n, g, srcX, srcY, killer) {
     if (this.inv > 0 || g.state !== 'play') return;
+    if (this.shield > 0) { // v5.3 护盾：先扣吸收池，破盾前不吃 HP 伤害（承伤数值口径保持原样）
+      const a = Math.min(this.shield, n);
+      this.shield -= a; n -= a;
+      g.flashT = 10; SFX.play('item');
+      spawnParticles(g.cur, this.x, this.y, 8, '#7fb2e8', 2.6);
+      if (n <= 0) { this.inv = 45; return; } // 破盾硬直与掉血同量级，避免带盾时挨打频率翻倍
+    }
     this.hp -= n; this.inv = 90;
     g.lastKiller = killer || '未知';
     this.q = []; // 受击打断已排队的连射
@@ -375,7 +436,7 @@ class Player {
   // v5.1 近战武器：扇形挥击（whip 管线泛化），词条=击退/麻痹/大弧
   fireMelee(room, ux, uy, lvl, w) {
     const base = Math.atan2(uy, ux);
-    const q = ((Meta.load().wq || {})[w.id] || 0);
+    const q = gunTier(w.id); // v5.3 品质档（出身+强化）
     const gm = this.gunMods();
     let spread = (w.arc || 2.2) + (q >= 3 ? .5 : 0) + .6 * this.gl('kn_arc');
     if (this.gl('rp_ring') && w.id === 'reaper') spread = TAU - .1; // v5.2 灭世环
@@ -390,7 +451,7 @@ class Player {
       let da = Math.atan2(e.y - this.y, e.x - this.x) - base;
       while (da > Math.PI) da -= TAU; while (da < -Math.PI) da += TAU;
       if (Math.abs(da) > spread / 2) continue;
-      let dd = dmg * (this.upLv.execute && e.stun > 0 ? 1.5 : 1) * (w._six ? .6 : 1); // 紫卡协同：处决直觉；六连抓第二段 ×0.6
+      let dd = dmg * execMul(this, e) * (w._six ? .6 : 1); // v5.3 处决直觉（+15%，含残血）；六连抓第二段 ×0.6
       if ((this.gl('r_pier') && w.id === 'rail') || (this.gl('cl_brk') && w.id === 'club')) dd = e.dr ? dd / Math.max(.35, 1 - e.dr) : dd; // v5.2 破甲
       if (e.cfg) e.hit(dd, room, e.x, e.y); else e.hit(dd);
       if (w.id === 'club' && e.cfg) moveCircle(e, (e.x - this.x) / d * 26 * (1 + .5 * this.gl('cl_knock')), (e.y - this.y) / d * 26, room); // 钢筋棒击退
@@ -416,7 +477,7 @@ class Player {
       let da = Math.atan2(e.y - this.y, e.x - this.x) - base;
       while (da > Math.PI) da -= TAU; while (da < -Math.PI) da += TAU;
       if (Math.abs(da) > spread / 2 || !hasLos(room, this.x, this.y, e.x, e.y)) continue;
-      let dd = this.upLv.execute && e.stun > 0 ? dmg * 1.5 : dmg; // v5.2 处决协同进荆棘鞭
+      let dd = dmg * execMul(this, e); // v5.3 处决协同进荆棘鞭
       if (e.cfg) e.hit(dd, room, e.x, e.y); else e.hit(dd);
       if (this.gl('w_tan') && e.cfg && Math.random() < .12) e.stun = Math.max(e.stun || 0, 36); // 缠缚定身
       hits++; hitAny = true;
@@ -474,18 +535,19 @@ class Player {
       sk.cd = sk.cdMax; SFX.play('dash');
     }
   }
-  // v5.2 枪技能卡读取：当前枪的卡等级与聚合加成（clip/rl/rng/dmg/cd）
+  // v5.3 枪家族读取：同族只认"当前档"（覆盖升档），机制卡由 gl(id) 触发，不再逐张叠乘
   gl(key) { const g = this.gunLv && this.gunLv[this.weapon.id]; return (g && g[key]) || 0; }
   gunMods() {
-    const m = { clip: 0, rl: 0, rng: 0, dmg: 0, cd: 0 };
+    const m = { clip: 0, rl: 0, rng: 0, cd: 0, dmgFlat: 0 };
     const g = (this.gunLv || {})[this.weapon.id] || {};
     for (const k of Object.keys(g)) {
-      const u = UPGRADES.find(x => x.id === k);
-      if (u && u.add) for (const a of Object.keys(u.add)) m[a] = (m[a] || 0) + u.add[a] * g[k];
+      if (k.slice(0, 4) !== 'fam:') continue; // 仅家族键参与聚合，机制卡 id 走 gl()
+      const f = FAM[k.slice(4)], tier = (g[k] | 0) - 1;
+      if (f && tier >= 0) m[f.key] = f.vals[tier];
     }
     return m;
   }
-  gunLvOf(u) { const p = game.player; return u.gun ? (((p.gunLv || {})[u.gun] || {})[u.id] || 0) : (p.upLv[u.id] || 0); }
+  gunLvOf(u) { return u.isFam ? famTierOf(game.player, u.fam, u.gun || game.player.weapon.id) : (u.gun ? this.gl(u.id) : (this.upLv[u.id] || 0)); }
   heal(n) { this.hp = clamp(this.hp + n, 0, this.maxHp); }
   // v5.2 弹药：弹匣上限（随 Lv 与技能卡成长）/ 换弹时长；近战武器返回 0（无弹药概念）
   clipMax() { const w = WEAPONS[this.weapon.id]; if (!w.clip) return 0; return Math.max(1, Math.round((w.clip + this.gunMods().clip) * (1 + .1 * (this.weapon.lvl - 1)))); }
@@ -546,7 +608,7 @@ class Player {
         if (!o.dead && dist2(o.x, o.y, this.x, this.y) < 20 + this.r) damageProp(room, o, 99);
       if (this.dashing === 0) this.inv = Math.max(this.inv, 3); // 尾帧仅 3 帧缓冲，配合 CD 防永无敌
     } else if (modPlayerMove(this, room)) { /* 冰面惯性滑行中 */ }
-    else if (this.moving) { this.anim++; const sm = (this.slowT > 0 ? .8 : 1) * (this.adrT > 0 ? 1.3 : 1); moveCircle(this, mx * this.speed * sm, my * this.speed * sm, room); }
+    else if (this.moving) { this.anim++; const sm = (this.slowT > 0 ? .8 : 1) * (this.adrT > 0 ? 1.1 : 1); moveCircle(this, mx * this.speed * sm, my * this.speed * sm, room); } // v5.3 肾上腺素 +30%→+10%
     if (this.dashCd > 0) this.dashCd--;
     if (this.slowT > 0) this.slowT--;
     if (this.adrT > 0) this.adrT--;
@@ -629,7 +691,7 @@ class Player {
           room.tears.push(new Tear(this.x + ux * 14, this.y + uy * 14,
             ux * this.tearSpeed, uy * this.tearSpeed, weaponDmg(this, w), 8, true,
             { life: this.tearLife, bulletKey: 'chrys', spId: 'chrys', pierce: this.pierce,
-              deathBurst: { key: 'petal', n: 4 + Math.min(2, lvl - 1) + 2 * this.gl('c_reb'), dmgMul: .35, sp: this.tearSpeed * .75, life: Math.round(26 * (1 + .5 * this.gl('c_blo'))), jit: .15, fx: 'petal', homing: this.gl('c_tra') > 0, burn: this.gl('c_tox') > 0 } }));
+              deathBurst: { key: 'petal', n: 4 + Math.min(2, lvl - 1) + 2 * this.gl('c_reb'), dmgMul: .35, sp: this.tearSpeed * .75, life: Math.round(26 * (1 + .5 * this.gl('c_blo'))), jit: .15, fx: 'petal', burn: this.gl('c_tox') > 0 } }));
           SFX.play('shoot');
         } else if (w.id === 'pin') {
           room.tears.push(new Tear(this.x + ux * 14, this.y + uy * 14,
@@ -748,7 +810,7 @@ class Enemy {
       if (BIO) { // v5.1 紫卡/资源被动触发
         const pl = game.player;
         if (pl.upLv.adrenaline) pl.adrT = 120;
-        if (pl.upLv.bloodlust && ++pl.bloodCnt >= pl.bloodNeed) { pl.bloodCnt = 0; pl.heal(20); }
+        if (pl.bloodHeal > 0 && ++pl.bloodCnt >= pl.bloodNeed) { pl.bloodCnt = 0; pl.heal(pl.bloodHeal); } // v5.3 嗜血回复家族卡
         if (pl.weapon.id === 'reaper' && pl.gl('rp_harv')) pl.heal(4); // v5.2 收割
       }
       if (room.quota && !room.cleared && this.cfg.id !== 'minifly') room.killed++; // 分裂仔喂配额会让"真怪"提前清零，不计
@@ -783,7 +845,7 @@ class Enemy {
     const p = game.player;
     const c = this.cfg;
     let spd = c.spd * this.spdMul * (this.pinSlow > 0 ? .8 : 1); // v5.2 铁蒺藜/凝视减速
-    if (game.player && game.player.upLv && game.player.upLv.slowfield && dist2(game.player.x, game.player.y, this.x, this.y) < 120) spd *= .6; // 减速力场
+    if (game.player && game.player.slowPct > 0 && dist2(game.player.x, game.player.y, this.x, this.y) < 120) spd *= 1 - game.player.slowPct; // v5.3 减速力场家族卡（档位决定强度）
     const [dx, dy] = [p.x - this.x, p.y - this.y];
     const dl = Math.max(1, Math.hypot(dx, dy));
     const mv = c.float ? moveFloat : ((e, vx, vy, r) => moveCircle(e, vx, vy, r));
@@ -945,7 +1007,7 @@ class Boss {
     this.cfg = cfg;
     this.x = x; this.y = y; this.r = cfg.r;
     this.hp = Math.ceil(cfg.hp * (1 + .18 * (floorNum - 1)) * (game.statM || 1));
-    if (BIO) this.hp = this.maxHp = Math.ceil(1500 * (game.diffHp || 1)); // v5.2.1 文档基线：杜尔加 1500 血（吃难度倍率；房间倍率只作用于小怪）
+    if (BIO) this.hp = this.maxHp = Math.ceil(1500 * (game.diffHp || 1) * hpScale(game.stage || 1)); // v5.3：BOSS 血与小怪同用关卡尺度，避免"后期 BOSS 反而 3 秒躺"倒挂
     this.maxHp = this.hp;
     this.affix = isGate(game.stage || 1) ? choice(['rage', 'barrage', 'summon']) : null; // 门槛关 Boss 词缀
     this.dead = false; this.flash = 0; this.phase2 = false;
@@ -1119,7 +1181,7 @@ class Pickup {
       if (BIO) {
         if (this.openingT > 0) { if (--this.openingT <= 0) game.openChestLoot(room, this); return; }
         if (d < 58) {
-          if (this.bioInit && room.type !== 'start' && room.type !== 'boss' && room.enemies.some(e => !e.dead)) {
+          if (this.bioInit && room.type !== 'start' && room.type !== 'boss' && !room.cleared) { // v5.3：渐进刷怪下统一用"清房"口径（队列/预警/残敌都算未清）
             if (!room.denyT || game.runTime - room.denyT > 60) { room.denyT = game.runTime; SFX.play('deny'); game.hint = { text: '还有敌人在场！清光它们宝箱才能打开', t: 130 }; }
             return;
           }
@@ -1151,6 +1213,16 @@ class Pickup {
           p.heal(40); SFX.play('heal'); this.dead = true;
           game.toast = { item: { name: '使用药膏', desc: '回复 40 生命', color: '#e88a7a' }, t: 110 }; break;
         case 'coin': if (BIO) { game.runCoins++; game.runEarned++; } else p.coins++; SFX.play('coin'); this.dead = true; break;
+        case 'shield': { // v5.3 宝箱实物：护盾=独立吸收池（承伤固定口径 10/18/25 一律不动）
+          const pw = (this.item && this.item.power) || 30;
+          p.shield = Math.max(p.shield, pw); SFX.play('item'); this.dead = true;
+          game.toast = { item: { name: `护盾 +${pw}`, desc: '先吸伤害，破盾前不掉血', color: '#7fb2e8' }, t: 130 }; break;
+        }
+        case 'invul': { // v5.3 宝箱实物：应急短无敌（5-8 秒），用于硬闯弹幕/救人
+          const fr = (this.item && this.item.frames) || 300;
+          p.inv = Math.max(p.inv, fr); SFX.play('item'); this.dead = true;
+          game.toast = { item: { name: `无敌 ${(fr / 60).toFixed(0)} 秒`, desc: '这段时间任何伤害都不吃', color: '#e8c85e' }, t: 130 }; break;
+        }
         case 'item':
           p.applyItem(this.item); SFX.play('item'); this.dead = true;
           game.toast = { item: this.item, t: 200 };
@@ -1228,111 +1300,79 @@ const WEAPONS = {
   claw:   { id: 'claw',   name: '电弧爪',   c: '#7fe0d8', glyph: '爪', cd: 36, mult: 1.6, max: 5, rar: 'SR', melee: true, arc: 1.8, reach: 90, mdmg: 17, desc: '高速连抓，附带麻痹' },
   reaper: { id: 'reaper', name: '骨镰王',   c: '#cbb98a', glyph: '镰', cd: 45, mult: 2.6, max: 5, rar: 'SSR', melee: true, arc: 3.1, reach: 90, mdmg: 32, desc: '环形死亡横扫，一寸不留' },
 };
-// ── v5.2 枪技能矩阵：每枪 4 张专属卡（制作人拍板首版）；add=聚合加成键(clip/rl/rng/dmg/cd)，无 add 的走发射分支 gl(id) 特判 ──
-const GUN_SKILLS = [
-  // 制式冲锋枪（白）
-  { id: 'te_clip', gun: 'tear', name: '加长弹匣', desc: '弹匣 +2 发', max: 2, cat: 'res', rar: 'R', glyph: '匣', add: { clip: 2 } },
-  { id: 'te_rng', gun: 'tear', name: '稳定弹道', desc: '射程 +25%', max: 2, cat: 'atk', rar: 'R', glyph: '稳', add: { rng: .25 } },
-  { id: 'te_rl', gun: 'tear', name: '快速装填', desc: '换弹时间 -30%', max: 2, cat: 'res', rar: 'R', glyph: '填', add: { rl: .3 } },
-  { id: 'te_multi', gun: 'tear', name: '双弹连射', desc: '每次射击 +1 发弹', max: 1, cat: 'atk', rar: 'SSR', glyph: '双' },
-  // 激光枪（蓝）
-  { id: 'l_wide', gun: 'laser', name: '充能光束', desc: '光束宽度 +40%', max: 1, cat: 'atk', rar: 'R', glyph: '粗' },
-  { id: 'l_cut', gun: 'laser', name: '高热切割', desc: '对 >50% 血敌人 +25% 伤害', max: 1, cat: 'atk', rar: 'SR', glyph: '切' },
-  { id: 'l_batt', gun: 'laser', name: '节能电池', desc: '换弹 -25%', max: 2, cat: 'res', rar: 'SR', glyph: '电', add: { rl: .25 } },
-  { id: 'l_core', gun: 'laser', name: '聚焦棱镜', desc: '伤害 +20%', max: 2, cat: 'atk', rar: 'SSR', glyph: '棱', add: { dmg: .2 } },
-  // 闪电枪（蓝）
-  { id: 'j_jump', gun: 'light', name: '超载跳', desc: '链跳目标 +1', max: 2, cat: 'atk', rar: 'R', glyph: '跳' },
-  { id: 'j_par', gun: 'light', name: '感电', desc: '命中 15% 麻痹 0.5 秒', max: 1, cat: 'ctrl', rar: 'SR', glyph: '麻' },
-  { id: 'j_wide', gun: 'light', name: '弧光延展', desc: '射程 +15%', max: 2, cat: 'atk', rar: 'R', glyph: '弧', add: { rng: .15 } },
-  { id: 'j_amp', gun: 'light', name: '连锁增幅', desc: '链跳伤害衰减 85%→60%', max: 1, cat: 'atk', rar: 'SSR', glyph: '链' },
-  // 火焰枪（绿）
-  { id: 'f_noz', gun: 'flame', name: '燃料喷嘴', desc: '火舌粒子 +2', max: 1, cat: 'atk', rar: 'R', glyph: '喷' },
-  { id: 'f_burn', gun: 'flame', name: '灼烧地带', desc: '命中引燃：持续掉血 3 秒', max: 1, cat: 'atk', rar: 'SR', glyph: '燃' },
-  { id: 'f_arc', gun: 'flame', name: '加宽扇面', desc: '射程 +20%', max: 2, cat: 'atk', rar: 'R', glyph: '扇', add: { rng: .2 } },
-  { id: 'f_comp', gun: 'flame', name: '压缩气罐', desc: '弹匣 +3', max: 1, cat: 'res', rar: 'SSR', glyph: '罐', add: { clip: 3 } },
-  // 骨镰回旋镖（蓝）
-  { id: 's_two', gun: 'sickle', name: '双镰齐掷', desc: '同时掷出 2 把骨镰', max: 1, cat: 'atk', rar: 'SSR', glyph: '双' },
-  { id: 's_bal', gun: 'sickle', name: '配重镰柄', desc: '伤害 +20%', max: 2, cat: 'atk', rar: 'R', glyph: '衡', add: { dmg: .2 } },
-  { id: 's_fast', gun: 'sickle', name: '回旋加速', desc: '出手间隔 -20%', max: 2, cat: 'res', rar: 'R', glyph: '旋', add: { cd: .2 } },
-  { id: 's_sharp', gun: 'sickle', name: '开刃磨镰', desc: '飞行距离 +25%', max: 2, cat: 'atk', rar: 'R', glyph: '锐', add: { rng: .25 } },
-  // 罐罐雷（紫）
-  { id: 'm_two', gun: 'mortar', name: '双罐齐投', desc: '一次投掷 2 罐', max: 1, cat: 'atk', rar: 'SSR', glyph: '双' },
-  { id: 'm_big', gun: 'mortar', name: '大爆装药', desc: '爆炸半径 +30%', max: 1, cat: 'atk', rar: 'SR', glyph: '爆' },
-  { id: 'm_ash', gun: 'mortar', name: '重罐药', desc: '伤害 +15%', max: 2, cat: 'atk', rar: 'R', glyph: '药', add: { dmg: .15 } },
-  { id: 'm_quick', gun: 'mortar', name: '快速布雷', desc: '换弹 -30%', max: 2, cat: 'res', rar: 'R', glyph: '布', add: { rl: .3 } },
-  // 荆棘鞭（蓝）
-  { id: 'w_two', gun: 'whip', name: '二连鞭击', desc: '一次挥出两道鞭影', max: 1, cat: 'atk', rar: 'SR', glyph: '连' },
-  { id: 'w_leech', gun: 'whip', name: '吸血藤', desc: '每次挥击命中回复 2 生命(上限6)', max: 1, cat: 'surv', rar: 'SSR', glyph: '吸' },
-  { id: 'w_len', gun: 'whip', name: '加长鞭梢', desc: '鞭长 +35%', max: 2, cat: 'atk', rar: 'R', glyph: '长', add: { rng: .35 } },
-  { id: 'w_tan', gun: 'whip', name: '缠缚倒刺', desc: '命中 12% 定身 0.6 秒', max: 1, cat: 'ctrl', rar: 'SR', glyph: '缚' },
-  // 千瓣菊（绿）
-  { id: 'c_reb', gun: 'chrys', name: '重绽', desc: '碎裂花瓣 +2', max: 1, cat: 'atk', rar: 'R', glyph: '绽' },
-  { id: 'c_tra', gun: 'chrys', name: '寻香花瓣', desc: '花瓣带轻微追踪', max: 1, cat: 'atk', rar: 'SR', glyph: '寻' },
-  { id: 'c_blo', gun: 'chrys', name: '花期延长', desc: '花瓣存在 +50% 伤害 +10%', max: 1, cat: 'atk', rar: 'R', glyph: '期', add: { dmg: .1 } },
-  { id: 'c_tox', gun: 'chrys', name: '花毒', desc: '花瓣命中引燃（持续掉血）', max: 1, cat: 'atk', rar: 'SSR', glyph: '毒' },
-  // 刺猬钉（蓝）
-  { id: 'p_row', gun: 'pin', name: '钉阵加长', desc: '钉刺半径 +25%', max: 1, cat: 'ctrl', rar: 'SR', glyph: '阵' },
-  { id: 'p_mort', gun: 'pin', name: '见血封喉', desc: '钉刺伤害 +40%', max: 1, cat: 'atk', rar: 'SR', glyph: '喉' },
-  { id: 'p_burst', gun: 'pin', name: '弹射变钉', desc: '射程 +15%', max: 2, cat: 'atk', rar: 'R', glyph: '射', add: { rng: .15 } },
-  { id: 'p_bar', gun: 'pin', name: '铁蒺藜', desc: '踩钉敌人减速 1 秒', max: 1, cat: 'ctrl', rar: 'R', glyph: '蒺' },
-  // 穿云枪（紫）
-  { id: 'r_over', gun: 'rail', name: '超载电容', desc: '伤害 +35%', max: 1, cat: 'atk', rar: 'SSR', glyph: '载', add: { dmg: .35 } },
-  { id: 'r_dual', gun: 'rail', name: '双联弹仓', desc: '弹匣 +1', max: 1, cat: 'res', rar: 'SR', glyph: '联', add: { clip: 1 } },
-  { id: 'r_pier', gun: 'rail', name: '穿甲弹芯', desc: '无视敌人 50% 伤害减免', max: 1, cat: 'atk', rar: 'SSR', glyph: '穿' },
-  { id: 'r_chrg', gun: 'rail', name: '速充线圈', desc: '换弹 -25%', max: 2, cat: 'res', rar: 'R', glyph: '充', add: { rl: .25 } },
-  // 橡皮鸭（绿）
-  { id: 'd_bnc', gun: 'duck', name: '加鸭', desc: '弹跳次数 +1', max: 2, cat: 'atk', rar: 'R', glyph: '弹' },
-  { id: 'd_quack', gun: 'duck', name: '嘎战吼', desc: '伤害 +15%', max: 2, cat: 'atk', rar: 'R', glyph: '嘎', add: { dmg: .15 } },
-  { id: 'd_hard', gun: 'duck', name: '硬塑鸭壳', desc: '射程 +20%', max: 1, cat: 'atk', rar: 'SR', glyph: '塑', add: { rng: .2 } },
-  { id: 'd_flock', gun: 'duck', name: '群鸭冲锋', desc: '出手间隔 -15%', max: 2, cat: 'res', rar: 'SSR', glyph: '群', add: { cd: .15 } },
+// ── v5.3 枪械机制卡：只保留"给一个新行为"的专属卡（数值成长全部移交 FAM 家族）──
+// 每张卡的 id 就是各处发射分支的 gl(id) 钩子，改名/删除必须同步实体逻辑
+const GUN_MECH = [
+  // 制式冲锋枪（绿）
+  { id: 'te_multi', gun: 'tear', name: '双弹连射', desc: '每次射击 +1 发弹（每发伤害 -10%）', max: 1, cat: 'atk', q: 3, glyph: '双' },
+  // 激光枪（紫）
+  { id: 'l_wide', gun: 'laser', name: '充能光束', desc: '光束宽度 +40%', max: 1, cat: 'atk', q: 0, glyph: '粗' },
+  { id: 'l_cut', gun: 'laser', name: '高热切割', desc: '对 >50% 血敌人 +25% 伤害', max: 1, cat: 'atk', q: 1, glyph: '切' },
+  // 闪电枪（紫）
+  { id: 'j_jump', gun: 'light', name: '超载跳', desc: '链跳目标 +1', max: 2, cat: 'atk', q: 1, glyph: '跳' },
+  { id: 'j_par', gun: 'light', name: '感电', desc: '命中 15% 麻痹 0.5 秒', max: 1, cat: 'ctrl', q: 1, glyph: '麻' },
+  { id: 'j_amp', gun: 'light', name: '连锁增幅', desc: '链跳伤害衰减 85%→60%', max: 1, cat: 'atk', q: 2, glyph: '链' },
+  // 火焰枪（蓝）
+  { id: 'f_noz', gun: 'flame', name: '燃料喷嘴', desc: '火舌粒子 +2', max: 1, cat: 'atk', q: 0, glyph: '喷' },
+  { id: 'f_burn', gun: 'flame', name: '灼烧地带', desc: '命中引燃：持续掉血 3 秒', max: 1, cat: 'atk', q: 1, glyph: '燃' },
+  // 骨镰回旋镖（紫）
+  { id: 's_two', gun: 'sickle', name: '双镰齐掷', desc: '同时掷出 2 把骨镰', max: 1, cat: 'atk', q: 2, glyph: '双' },
+  // 罐罐雷（橙）
+  { id: 'm_two', gun: 'mortar', name: '双罐齐投', desc: '一次投掷 2 罐', max: 1, cat: 'atk', q: 2, glyph: '双' },
+  { id: 'm_big', gun: 'mortar', name: '大爆装药', desc: '爆炸半径 +30%', max: 1, cat: 'atk', q: 1, glyph: '爆' },
+  // 荆棘鞭（紫）
+  { id: 'w_two', gun: 'whip', name: '二连鞭击', desc: '一次挥出两道鞭影', max: 1, cat: 'atk', q: 1, glyph: '连' },
+  { id: 'w_leech', gun: 'whip', name: '吸血藤', desc: '每次挥击命中回复 2 生命(上限6)', max: 1, cat: 'surv', q: 2, glyph: '吸' },
+  { id: 'w_tan', gun: 'whip', name: '缠缚倒刺', desc: '命中 12% 定身 0.6 秒', max: 1, cat: 'ctrl', q: 1, glyph: '缚' },
+  // 千瓣菊（蓝）
+  { id: 'c_reb', gun: 'chrys', name: '重绽', desc: '碎裂花瓣 +2', max: 1, cat: 'atk', q: 0, glyph: '绽' },
+  { id: 'c_blo', gun: 'chrys', name: '花期延长', desc: '花瓣存在时间 +50%', max: 1, cat: 'atk', q: 0, glyph: '期' },
+  { id: 'c_tox', gun: 'chrys', name: '花毒', desc: '花瓣命中引燃（持续掉血）', max: 1, cat: 'atk', q: 2, glyph: '毒' },
+  // 刺猬钉（紫）
+  { id: 'p_row', gun: 'pin', name: '钉阵加长', desc: '钉刺半径 +25%', max: 1, cat: 'ctrl', q: 1, glyph: '阵' },
+  { id: 'p_mort', gun: 'pin', name: '见血封喉', desc: '钉刺伤害 +40%', max: 1, cat: 'atk', q: 1, glyph: '喉' },
+  { id: 'p_bar', gun: 'pin', name: '铁蒺藜', desc: '踩钉敌人减速 1 秒', max: 1, cat: 'ctrl', q: 0, glyph: '蒺' },
+  // 穿云枪（橙）
+  { id: 'r_pier', gun: 'rail', name: '穿甲弹芯', desc: '无视敌人 50% 伤害减免', max: 1, cat: 'atk', q: 2, glyph: '穿' },
+  // 橡皮鸭（蓝）
+  { id: 'd_bnc', gun: 'duck', name: '加鸭', desc: '弹跳次数 +1', max: 2, cat: 'atk', q: 0, glyph: '弹' },
   // 工蜂箱（蓝）
-  { id: 'h_queen', gun: 'hive', name: '蜂后之怒', desc: '放蜂 +2 只', max: 1, cat: 'atk', rar: 'SR', glyph: '后' },
-  { id: 'h_venom', gun: 'hive', name: '毒针', desc: '蜂叮引燃（持续掉血）', max: 1, cat: 'atk', rar: 'SSR', glyph: '针' },
-  { id: 'h_loyal', gun: 'hive', name: '忠蜂', desc: '蜜蜂存在时间 +50%', max: 1, cat: 'atk', rar: 'R', glyph: '忠' },
-  { id: 'h_breed', gun: 'hive', name: '速繁', desc: '出箱间隔 -20%', max: 2, cat: 'res', rar: 'R', glyph: '繁', add: { cd: .2 } },
-  // 漩涡核（紫）
-  { id: 'v_col', gun: 'vortex', name: '大坍缩', desc: '漩涡半径 +30%', max: 1, cat: 'ctrl', rar: 'SSR', glyph: '坍' },
-  { id: 'v_suc', gun: 'vortex', name: '贪食黑洞', desc: '吸聚持续时间 +1 秒', max: 1, cat: 'ctrl', rar: 'SR', glyph: '吞' },
-  { id: 'v_boom', gun: 'vortex', name: '末爆强化', desc: '塌缩爆炸伤害 ×1.5', max: 1, cat: 'atk', rar: 'SR', glyph: '崩' },
-  { id: 'v_flow', gun: 'vortex', name: '双流', desc: '弹匣 +1', max: 1, cat: 'res', rar: 'R', glyph: '流', add: { clip: 1 } },
-  // 双影铳（绿）
-  { id: 'tw_three', gun: 'twin', name: '三连影弹', desc: '影弹数 +1', max: 1, cat: 'atk', rar: 'SSR', glyph: '三' },
-  { id: 'tw_bal', gun: 'twin', name: '均衡射击', desc: '影弹伤害 0.5→0.7', max: 1, cat: 'atk', rar: 'SR', glyph: '衡' },
-  { id: 'tw_feed', gun: 'twin', name: '火力延续', desc: '换弹 -20%', max: 2, cat: 'res', rar: 'R', glyph: '续', add: { rl: .2 } },
-  { id: 'tw_press', gun: 'twin', name: '分身压制', desc: '伤害 +12%', max: 2, cat: 'atk', rar: 'R', glyph: '压', add: { dmg: .12 } },
-  // 近战：开山刀（绿）
-  { id: 'kn_arc', gun: 'knife', name: '顺劈横扫', desc: '挥击弧度 +0.6', max: 1, cat: 'atk', rar: 'R', glyph: '扫' },
-  { id: 'kn_slow', gun: 'knife', name: '欺软怕硬', desc: '伤害 +20%', max: 2, cat: 'atk', rar: 'R', glyph: '欺', add: { dmg: .2 } },
-  { id: 'kn_hand', gun: 'knife', name: '快手刀客', desc: '出手间隔 -15%', max: 2, cat: 'res', rar: 'R', glyph: '快', add: { cd: .15 } },
-  { id: 'kn_cut', gun: 'knife', name: '利落收刀', desc: '射程 +15%', max: 1, cat: 'atk', rar: 'SR', glyph: '利', add: { rng: .15 } },
-  // 近战：钢筋棒（蓝）
-  { id: 'cl_knock', gun: 'club', name: '抡圆了砸', desc: '击退距离 +50%', max: 1, cat: 'ctrl', rar: 'SSR', glyph: '抡' },
-  { id: 'cl_quake', gun: 'club', name: '震地', desc: '命中 20% 眩晕 0.5 秒', max: 1, cat: 'ctrl', rar: 'SR', glyph: '震' },
-  { id: 'cl_brk', gun: 'club', name: '破甲重击', desc: '无视敌人 50% 伤害减免', max: 1, cat: 'atk', rar: 'SR', glyph: '破' },
-  { id: 'cl_arm', gun: 'club', name: '铁腕', desc: '出手间隔 -12%', max: 2, cat: 'res', rar: 'R', glyph: '腕', add: { cd: .12 } },
-  // 近战：电弧爪（蓝）
-  { id: 'cw_par', gun: 'claw', name: '加强电流', desc: '麻痹概率 30%→40%', max: 1, cat: 'ctrl', rar: 'SR', glyph: '强' },
-  { id: 'cw_six', gun: 'claw', name: '六连抓', desc: '每次挥击追加第二段(×0.6)', max: 1, cat: 'atk', rar: 'SSR', glyph: '六' },
-  { id: 'cw_zap', gun: 'claw', name: '静电场', desc: '伤害 +15%', max: 2, cat: 'atk', rar: 'R', glyph: '电', add: { dmg: .15 } },
-  { id: 'cw_gale', gun: 'claw', name: '疾风爪', desc: '出手间隔 -12%', max: 2, cat: 'res', rar: 'R', glyph: '疾', add: { cd: .12 } },
-  // 近战：骨镰王（紫）
-  { id: 'rp_ring', gun: 'reaper', name: '灭世环', desc: '挥击弧度接近全圆', max: 1, cat: 'atk', rar: 'SSR', glyph: '环' },
-  { id: 'rp_harv', gun: 'reaper', name: '收割', desc: '击杀回复 4 生命', max: 1, cat: 'surv', rar: 'SR', glyph: '收' },
-  { id: 'rp_gaze', gun: 'reaper', name: '死亡凝视', desc: '横扫范围内敌人减速', max: 1, cat: 'ctrl', rar: 'R', glyph: '凝' },
-  { id: 'rp_hev', gun: 'reaper', name: '巨刃', desc: '横扫半径 +30%', max: 2, cat: 'atk', rar: 'R', glyph: '巨', add: { rng: .3 } },
+  { id: 'h_queen', gun: 'hive', name: '蜂后之怒', desc: '放蜂 +2 只', max: 1, cat: 'atk', q: 1, glyph: '后' },
+  { id: 'h_venom', gun: 'hive', name: '毒针', desc: '蜂叮引燃（持续掉血）', max: 1, cat: 'atk', q: 2, glyph: '针' },
+  { id: 'h_loyal', gun: 'hive', name: '忠蜂', desc: '蜜蜂存在时间 +50%', max: 1, cat: 'atk', q: 0, glyph: '忠' },
+  // 漩涡核（橙）
+  { id: 'v_col', gun: 'vortex', name: '大坍缩', desc: '漩涡半径 +30%', max: 1, cat: 'ctrl', q: 2, glyph: '坍' },
+  { id: 'v_suc', gun: 'vortex', name: '贪食黑洞', desc: '吸聚持续时间 +1 秒', max: 1, cat: 'ctrl', q: 1, glyph: '吞' },
+  { id: 'v_boom', gun: 'vortex', name: '末爆强化', desc: '塌缩爆炸伤害 ×1.5', max: 1, cat: 'atk', q: 1, glyph: '崩' },
+  // 双影铳（蓝）
+  { id: 'tw_three', gun: 'twin', name: '三连影弹', desc: '影弹数 +1', max: 1, cat: 'atk', q: 2, glyph: '三' },
+  { id: 'tw_bal', gun: 'twin', name: '均衡射击', desc: '影弹伤害 0.5→0.7', max: 1, cat: 'atk', q: 1, glyph: '衡' },
+  // 近战：开山刀（蓝）
+  { id: 'kn_arc', gun: 'knife', name: '顺劈横扫', desc: '挥击弧度 +0.6', max: 1, cat: 'atk', q: 0, glyph: '扫' },
+  // 近战：钢筋棒（紫）
+  { id: 'cl_knock', gun: 'club', name: '抡圆了砸', desc: '击退距离 +50%', max: 1, cat: 'ctrl', q: 2, glyph: '抡' },
+  { id: 'cl_quake', gun: 'club', name: '震地', desc: '命中 20% 眩晕 0.5 秒', max: 1, cat: 'ctrl', q: 1, glyph: '震' },
+  { id: 'cl_brk', gun: 'club', name: '破甲重击', desc: '无视敌人 50% 伤害减免', max: 1, cat: 'atk', q: 1, glyph: '破' },
+  // 近战：电弧爪（紫）
+  { id: 'cw_par', gun: 'claw', name: '加强电流', desc: '麻痹概率 30%→40%', max: 1, cat: 'ctrl', q: 1, glyph: '强' },
+  { id: 'cw_six', gun: 'claw', name: '六连抓', desc: '每次挥击追加第二段(×0.6)', max: 1, cat: 'atk', q: 2, glyph: '六' },
+  // 近战：骨镰王（橙）
+  { id: 'rp_ring', gun: 'reaper', name: '灭世环', desc: '挥击弧度接近全圆', max: 1, cat: 'atk', q: 4, glyph: '环' },
+  { id: 'rp_harv', gun: 'reaper', name: '收割', desc: '击杀回复 4 生命', max: 1, cat: 'surv', q: 1, glyph: '收' },
+  { id: 'rp_gaze', gun: 'reaper', name: '死亡凝视', desc: '横扫范围内敌人减速', max: 1, cat: 'ctrl', q: 0, glyph: '凝' },
 ];
-for (const u of GUN_SKILLS) { u.c = WEAPONS[u.gun].c; if (!u.add) u.apply = () => {}; }
-UPGRADES.push(...GUN_SKILLS);
+for (const u of GUN_MECH) { u.c = WEAPONS[u.gun].c; u.apply = () => {}; } // 机制卡不进入数值聚合，只由 gl(id) 触发
+UPGRADES.push(...GUN_MECH);
 
 function weaponDmg(p, w) {
   let d = p.dmg * w.mult * (1 + .35 * (p.weapon.lvl - 1));
   const lvMul = 1 + .35 * (p.weapon.lvl - 1);
   if (BIO && w.melee) d = Math.max(d, (w.mdmg || 0) * lvMul); // 文档近战伤害区间 15-40 保底（随 Lv 成长）
   if (BIO && !w.melee && w.rdmg) d = Math.max(d, w.rdmg * lvMul); // v5.2 远程伤害地板：血条数值尺度下保证杀得动
-  if (p.gunMods) d *= 1 + p.gunMods().dmg; // v5.2 枪技能卡伤害聚合
-  const q = ((Meta.load().wq || {})[w.id] || 0); // 品质：每档 +15% 基础伤
-  d *= 1 + .15 * q;
-  if (q >= 1 && Math.random() < .25) d *= 1.8; // 精良词条：暴击 +25% 概率 ×1.8
+  if (p.gunMods) d += p.gunMods().dmgFlat; // v5.3 伤害卡由乘区改加算（弹头精修整数地板），杜绝"5 张卡 ×2.0"
+  const q = gunTier(w.id); // v5.3 品质档（出身+强化，0..4）：每档 +10%（原 4 档 +15%，扩档同时收敛避免后期爆表）
+  d *= 1 + .10 * q;
+  if (q >= 2 && Math.random() < .25) d *= 1.8; // 暴击词条：紫档(品质档≥2)起解锁，+25% 概率 ×1.8
   return d;
 }
 
@@ -1351,18 +1391,16 @@ function rollGachaId() {
   const r = Math.random();
   return choice(GACHA_POOL[r < .06 ? 'SSR' : r < .34 ? 'SR' : 'R']);
 }
-// v5.1 武器合成（文档 3.2/7.2）：材料+金币升品质，品质=词条数
-const WQ_NAMES = ['普通', '精良', '稀有', '传说'];
-const WQ_C = ['#b0a08a', '#8ecbff', '#b093e8', '#e8c85e'];
+// v5.3 武器合成：材料+金币升「强化级」（0..4）；玩家看到的品质档 = 出身档 + 强化级（封顶 红）
 function craftCost(wid) {
-  const q = (Meta.load().wq || {})[wid] || 0;
+  const q = gunWq(wid);
   return { iron: 2 + 2 * q, core: q, coins: 200 * (q + 1), next: q + 1 };
 }
 function craftWeapon(wid) {
   const m = Meta.load();
   if (!weaponOwned(wid)) return 'no';
-  const q = (m.wq || {})[wid] || 0;
-  if (q >= 3) return 'max';
+  const q = gunWq(wid);
+  if (q >= WQ_MAX) return 'max';
   const c = craftCost(wid);
   if ((m.mats.iron || 0) < c.iron || (m.mats.core || 0) < c.core || m.coins < c.coins) return 'poor';
   m.mats.iron -= c.iron; m.mats.core -= c.core; m.coins -= c.coins;

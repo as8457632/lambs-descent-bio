@@ -302,6 +302,32 @@ function drawFx(ctx, g) {
 }
 
 // ── 敌人：Q 版怪物 QArt.drawEnemy（15 种 + 精英光环 + 受击闪白 + 出生冒泡）──
+// v5.3 渐进刷怪：出怪前 0.75s 的地面预警圈（玩家看得见刷怪口，方便提前站位风筝）
+function drawSpawnMarks(ctx, room, t) {
+  const pend = room.spawnPending || [];
+  for (const w of pend) {
+    const k = 1 - w.t / SPAWN_WARN; // 0 → 1
+    const r = 12 + 24 * k;
+    const col = w.ranged ? '#e8c85e' : '#c94a4a'; // 黄=远程弹幕口，红=近战口
+    ctx.save();
+    ctx.globalAlpha = .18 + .22 * k; ctx.fillStyle = col;
+    ctx.beginPath(); ctx.arc(w.x, w.y, r, 0, TAU); ctx.fill();
+    ctx.globalAlpha = .4 + .5 * k; ctx.strokeStyle = col; ctx.lineWidth = 2.4;
+    ctx.setLineDash([7, 5]); ctx.lineDashOffset = -t * .5;
+    ctx.beginPath(); ctx.arc(w.x, w.y, r, 0, TAU); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#f0e6d8'; ctx.font = 'bold 13px monospace'; ctx.textAlign = 'center';
+    ctx.fillText('!', w.x, w.y + 5);
+    ctx.restore();
+  }
+  if ((room.spawnQueue || []).length && !pend.length && !room.cleared) { // 队列仍在但暂被背压：淡标出口位置
+    ctx.save();
+    ctx.globalAlpha = .14; ctx.strokeStyle = '#c94a4a'; ctx.lineWidth = 1.6;
+    for (const p of room.spawnPorts || []) { ctx.beginPath(); ctx.arc(p.x, p.y, 15, 0, TAU); ctx.stroke(); }
+    ctx.restore();
+  }
+}
+
 function drawEnemy(ctx, e, t) {
   const p = game.player;
   const d = p ? Math.max(1, dist2(p.x, p.y, e.x, e.y)) : 1;
@@ -436,6 +462,20 @@ function drawPickup(ctx, pk, t) {
       ctx.fillStyle = '#e8e0d0'; ctx.beginPath(); ctx.roundRect(-10, -8, 20, 16, 3); ctx.fill();
       ctx.strokeStyle = '#8a6b5a'; ctx.lineWidth = 1.5; ctx.stroke();
       ctx.fillStyle = '#c4303a'; ctx.fillRect(-2.2, -5.5, 4.4, 11); ctx.fillRect(-6.5, -2.2, 13, 4.4);
+      break; }
+    case 'shield': { // v5.3 护盾：蓝盾形
+      ctx.fillStyle = 'rgba(127,178,232,.9)';
+      ctx.beginPath(); ctx.moveTo(0, -11); ctx.lineTo(9, -6); ctx.lineTo(9, 3); ctx.quadraticCurveTo(9, 10, 0, 12);
+      ctx.quadraticCurveTo(-9, 10, -9, 3); ctx.lineTo(-9, -6); ctx.closePath(); ctx.fill();
+      ctx.strokeStyle = '#dceaf8'; ctx.lineWidth = 1.6; ctx.stroke();
+      ctx.fillStyle = 'rgba(255,255,255,.55)'; ctx.fillRect(-1.6, -6, 3.2, 12);
+      break; }
+    case 'invul': { // v5.3 应急无敌：金星
+      ctx.fillStyle = '#e8c85e';
+      ctx.beginPath();
+      for (let k = 0; k < 10; k++) { const a = -Math.PI / 2 + k * Math.PI / 5, rr = k % 2 ? 4.5 : 11; ctx.lineTo(Math.cos(a) * rr, Math.sin(a) * rr); }
+      ctx.closePath(); ctx.fill();
+      ctx.strokeStyle = '#fff2c0'; ctx.lineWidth = 1.4; ctx.stroke();
       break; }
     case 'coin':
       ctx.fillStyle = '#d9a92e'; ctx.beginPath(); ctx.arc(0, 0, 9, 0, TAU); ctx.fill();
@@ -605,7 +645,15 @@ function drawHUD(ctx, g) {
     if (frac <= .25 && Math.floor(g.time / 12) % 2 === 0) { ctx.fillStyle = 'rgba(255,60,60,.35)'; ctx.fillRect(bx, by, bw * frac, bh); }
     ctx.strokeStyle = 'rgba(232,200,140,.6)'; ctx.lineWidth = 1; ctx.strokeRect(bx, by, bw, bh);
     ctx.fillStyle = '#ffe0c0'; ctx.font = 'bold 10px monospace'; ctx.textAlign = 'left';
-    ctx.fillText(`${Math.max(0, Math.ceil(p.hp))}/${p.maxHp}`, bx + 5, by + 11);
+    ctx.fillText(`${Math.max(0, Math.ceil(p.hp))}/${p.maxHp}${p.shield > 0 ? ' +' + Math.ceil(p.shield) : ''}`, bx + 5, by + 11);
+    if (p.shield > 0) { // v5.3 护盾段：血条下方蓝条（吸收池，不是回血）
+      ctx.fillStyle = '#12202c'; ctx.fillRect(bx, by + bh + 2, bw, 4);
+      ctx.fillStyle = '#7fb2e8'; ctx.fillRect(bx, by + bh + 2, bw * clamp(p.shield / Math.max(1, p.maxHp), 0, 1), 4);
+    }
+    if (p.inv > 90) { // 紫箱应急无敌（普通受击无敌只有 90 帧，不该显示成"无敌"）
+      ctx.fillStyle = '#e8c85e'; ctx.font = 'bold 10px monospace';
+      ctx.fillText(`无敌 ${Math.ceil(p.inv / 60)}s`, bx + bw + 8, by + 11);
+    }
   }
   // 金币 / 冲刺CD（v5.1.1：BIO 改右侧纵列「计时→金币→积分→冲刺」，顶部中央波次条独占整行；桌面/横屏仍贴 HUD 底缘）
   const coinN = BIO ? (game.runCoins || 0) : p.coins; // 搜打撤：HUD 显示随身金币（账户另在标题/工坊）
@@ -704,24 +752,28 @@ function drawHUD(ctx, g) {
     ctx.globalAlpha = 1;
   }
 
-  // 道具获得提示（HUD 下方顶部条，不挡战斗区）
-  if (g.toast && g.toast.t > 0) {
-    const a = clamp(g.toast.t / 30, 0, 1);
-    const ty = g.state === 'levelup' ? CANVAS_H - 170 : HUD_H + 30; // v5.2 门禁P1：升级界面顶部与副题叠字，改底部弹出
-    ctx.globalAlpha = a;
-    const tg = ctx.createLinearGradient(0, ty, 0, ty + 40);
-    tg.addColorStop(0, 'rgba(24,15,10,.94)'); tg.addColorStop(1, 'rgba(14,9,6,.88)');
-    ctx.fillStyle = tg;
-    ctx.beginPath(); ctx.roundRect(VIEW_W / 2 - 158, ty, 316, 40, 6); ctx.fill();
-    ctx.strokeStyle = g.toast.item.color; ctx.lineWidth = 1.5;
-    ctx.beginPath(); ctx.roundRect(VIEW_W / 2 - 158, ty, 316, 40, 6); ctx.stroke();
-    drawItemIcon(ctx, g.toast.item, VIEW_W / 2 - 136, ty + 20, g.time);
-    ctx.fillStyle = '#f0e6d8'; ctx.font = 'bold 13px monospace'; ctx.textAlign = 'left';
-    ctx.fillText(g.toast.item.name, VIEW_W / 2 - 112, ty + 16);
-    ctx.fillStyle = '#b09a80'; ctx.font = '11px monospace';
-    ctx.fillText(g.toast.item.desc, VIEW_W / 2 - 112, ty + 32);
-    ctx.globalAlpha = 1;
-  }
+  // 道具获得提示改到 drawItemToast()：必须在三选一/换枪面板之后绘制，否则被 .82 遮罩压成灰字（v5.3 门禁 P0）
+  ctx.restore();
+}
+
+// 物品/技能获得 toast（顶部条；升级选单态改底部弹出，避开副题与"已持有"面板）
+function drawItemToast(ctx, g) {
+  if (!g.toast || g.toast.t <= 0) return;
+  const a = clamp(g.toast.t / 30, 0, 1);
+  const ty = g.state === 'levelup' ? CANVAS_H - 170 : HUD_H + 30; // v5.2 门禁P1：升级界面顶部与副题叠字，改底部弹出
+  ctx.save();
+  ctx.globalAlpha = a;
+  const tg = ctx.createLinearGradient(0, ty, 0, ty + 40);
+  tg.addColorStop(0, 'rgba(24,15,10,.94)'); tg.addColorStop(1, 'rgba(14,9,6,.88)');
+  ctx.fillStyle = tg;
+  ctx.beginPath(); ctx.roundRect(VIEW_W / 2 - 158, ty, 316, 40, 6); ctx.fill();
+  ctx.strokeStyle = g.toast.item.color; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.roundRect(VIEW_W / 2 - 158, ty, 316, 40, 6); ctx.stroke();
+  drawItemIcon(ctx, g.toast.item, VIEW_W / 2 - 136, ty + 20, g.time);
+  ctx.fillStyle = '#f0e6d8'; ctx.font = 'bold 13px monospace'; ctx.textAlign = 'left';
+  ctx.fillText(g.toast.item.name, VIEW_W / 2 - 112, ty + 16);
+  ctx.fillStyle = '#b09a80'; ctx.font = '11px monospace';
+  ctx.fillText(g.toast.item.desc, VIEW_W / 2 - 112, ty + 32);
   ctx.restore();
 }
 
@@ -844,8 +896,8 @@ function backBtnZone() { return { x: CANVAS_W / 2 - 60, y: CANVAS_H - 44, w: 120
 function accountZone() { return BIO ? { x: CANVAS_W - 128, y: 4, w: 122, h: 20 } : { x: CANVAS_W - 250, y: 2, w: 246, h: 20 }; } // 标题屏右上账号状态条
 function acctBtnZone() { return BIO ? { x: CANVAS_W / 2 - 96, y: UIY(444) + 46, w: 192, h: 32 } : { x: CANVAS_W / 2 - 96 + PANEL_W / 2 - 220, y: 444, w: 110, h: 32 }; } // 标题"账号"按钮（BIO：工坊下方纵排）
 function bigNextZone() { return { x: CANVAS_W / 2 - 110, y: BIO ? UIY(398) : UIY(430), w: 220, h: 44 }; } // 结算屏大按钮（BIO 上移避开工坊）
-function acctRowsZones() { // 账号面板 6 行 + 返回（v4.3-F3：行高 46/间距 50；BIO 竖屏行高 60/间距 86）
-  const rows = ['status', 'nick', 'server', 'export', 'import', 'armory', 'back'].map((id, i) =>
+function acctRowsZones() { // 账号面板 7 行 + 返回（v4.3-F3：行高 46/间距 50；BIO 竖屏行高 60/间距 86）
+  const rows = ['status', 'nick', 'server', 'export', 'import', 'armory', 'ctrl', 'back'].map((id, i) =>
     BIO ? { id, x: CANVAS_W / 2 - 220, y: 170 + i * 86, w: 440, h: 60 }
         : { id, x: CANVAS_W / 2 - 190, y: 118 + i * 50, w: 380, h: 46 });
   return rows;
@@ -911,7 +963,7 @@ function drawHeadHud(ctx, p, t) {
   const a = Math.max(0, p.ammo), gap = 7, x0 = p.x - (cm - 1) * gap / 2, yy = p.y - 30;
   for (let i = 0; i < cm; i++) {
     ctx.beginPath(); ctx.arc(x0 + i * gap, yy, 2.7, 0, TAU);
-    ctx.fillStyle = i < a ? (RAR_C[(WEAPONS[p.weapon.id]).rar] || '#cfc6b8') : 'rgba(110,100,90,.5)';
+    ctx.fillStyle = i < a ? qColor(gunTier(WEAPONS[p.weapon.id].id)) : 'rgba(110,100,90,.5)';
     ctx.fill(); ctx.strokeStyle = 'rgba(8,6,4,.75)'; ctx.lineWidth = 1; ctx.stroke();
   }
   if (p.reloadT > 0) {
@@ -929,8 +981,7 @@ function wcheckZones() {
 function drawWeaponCheck(ctx, g) {
   const pk = g.wcheck && g.wcheck.pk; if (!pk) return;
   const wd = WEAPONS[pk.wid], p = g.player;
-  const RARN = { SSR: '传说', SR: '稀有', R: '精良', null: '普通' };
-  const rc = pk.wid === 'tear' ? '#cfc6b8' : WEAPONS[pk.wid].rar === 'SSR' ? '#b093e8' : WEAPONS[pk.wid].rar === 'SR' ? '#7fb2e8' : '#7fae5a';
+  const tc = gunTier(pk.wid), rc = qColor(tc); // v5.3 品质档 绿/蓝/紫/橙/红
   const cur = p.weapon;
   p.weapon = { id: pk.wid, lvl: 1 };
   const atk = Math.round(weaponDmg(p, wd)), rng = Math.round(weaponRange(p));
@@ -944,7 +995,7 @@ function drawWeaponCheck(ctx, g) {
   ctx.fillStyle = '#f0e6d8'; ctx.font = 'bold 22px monospace';
   ctx.fillText(wd.name, cx0, cy0 - 108);
   ctx.fillStyle = rc; ctx.font = 'bold 13px monospace';
-  ctx.fillText(`[${RARN[wd.rar || 'null']}]  ${wd.melee ? '近战' : '远程'}`, cx0, cy0 - 84);
+  ctx.fillText(`[${qName(tc)}${gunWq(pk.wid) ? '·强化' + gunWq(pk.wid) : ''}]  ${wd.melee ? '近战' : '远程'}`, cx0, cy0 - 84);
   ctx.fillStyle = '#d9c9a8'; ctx.font = 'bold 15px monospace'; ctx.textAlign = 'left';
   const rows = [
     ['等级', '1 级（入手后同枪再捡升级）'],
@@ -971,30 +1022,66 @@ function drawWeaponCheck(ctx, g) {
   ctx.restore();
 }
 // v5.2.1 开箱选技能界面（原升级三选一 UI 复用）
+// 本局已持有的技能（家族当前档 + 机制卡叠层），供三选一界面"已持有"面板使用
+function ownedSkillLines(p) {
+  const gun = p.weapon.id, out = [];
+  for (const fam of Object.keys(FAM)) {
+    const f = FAM[fam];
+    if (f.scope === 'gun' && ((f.key === 'clip' && !WEAPONS[gun].clip) || (f.key === 'rl' && WEAPONS[gun].melee))) continue;
+    const t = famTierOf(p, fam, f.scope === 'gun' ? gun : null);
+    if (t < 0) continue;
+    out.push({ name: f.name, tag: f.scope === 'gun' ? WEAPONS[gun].name : '通用', tier: t, stacks: 0 });
+  }
+  for (const u of UPGRADES) {
+    if (u.gun && u.gun !== gun) continue;
+    const lv = p.gunLvOf(u);
+    if (!lv) continue;
+    out.push({ name: u.name, tag: u.gun ? WEAPONS[u.gun].name : '通用', tier: u.q | 0, stacks: lv, max: u.max });
+  }
+  return out;
+}
+// 5 档品质计量条：亮到第 tier+1 格
+function drawQMeter(ctx, x, y, tier, cellW) {
+  for (let k = 0; k < 5; k++) {
+    ctx.fillStyle = k <= tier ? qColor(k) : 'rgba(255,255,255,.08)';
+    ctx.beginPath(); ctx.roundRect(x + k * cellW, y, cellW - 2, 6, 2); ctx.fill();
+  }
+}
 function drawLevelUp(ctx, g) {
   ctx.save();
   ctx.fillStyle = 'rgba(8,4,3,.82)'; ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
   ctx.fillStyle = '#e8c85e'; ctx.font = 'bold 26px monospace'; ctx.textAlign = 'center';
-  ctx.fillText('宝 箱 · 选 择 技 能', CANVAS_W / 2, 106);
+  ctx.fillText('宝 箱 · 选 择 技 能', CANVAS_W / 2, 90);
   ctx.fillStyle = '#8a7360'; ctx.font = '12px monospace';
   const nCards = (g.levelChoices || []).length; // v5.1.1：按实际卡数提示（四选一显示 1/2/3/4）
-  ctx.fillText(`选择一项技能（按 ${Array.from({ length: nCards }, (_, i) => i + 1).join(' / ')} 或点击卡片）—— 卡池来自当前武器`, CANVAS_W / 2, 124);
+  ctx.fillText(`选择一项技能（按 ${Array.from({ length: nCards }, (_, i) => i + 1).join(' / ')} 或点击卡片）—— 卡池：当前枪 7 成 + 通用 3 成`, CANVAS_W / 2, 108);
+  // v5.3 用户反馈"品质要说清楚"：顶部常驻 5 档图例 + 本关上限（上限由掷卡时写入 game.levelCap）
+  const cap = g.levelCap == null ? qCapForStage(g.stage || 1) : g.levelCap | 0;
+  const legW = 5 * 52, lx0 = CANVAS_W / 2 - legW / 2;
+  ctx.textAlign = 'left'; ctx.font = 'bold 11px monospace';
+  for (let k = 0; k < 5; k++) {
+    ctx.globalAlpha = k <= cap ? 1 : .35;
+    ctx.fillStyle = qColor(k);
+    ctx.beginPath(); ctx.roundRect(lx0 + k * 52, 118, 11, 11, 3); ctx.fill();
+    ctx.fillStyle = k <= cap ? '#d9c9a8' : '#5a4c42';
+    ctx.fillText(qName(k), lx0 + k * 52 + 15, 128);
+  }
+  ctx.globalAlpha = 1; ctx.fillStyle = '#a8937c';
+  ctx.fillText(`本关上限 ${qName(cap)}`, lx0 + 5 * 52 + 4, 128);
   const zones = levelCardZones();
   g.levelChoices.forEach((u, i) => {
     const z = zones[i], lv = g.player.gunLvOf(u);
     const hov = Touch.menuHover && inZone(Touch.menuHover, z);
     ctx.fillStyle = hov ? '#241a12' : '#1a130d';
     ctx.beginPath(); ctx.roundRect(z.x, z.y, z.w, z.h, 8); ctx.fill();
-    // v5.1 文档 4.1：品质边框 白/蓝/紫 + 四方向角标
-    const rarC = u.rar === 'SSR' ? '#b093e8' : u.rar === 'SR' ? '#7fb2e8' : '#cfc6b8'; // v5.2.1 文档口径：技能品质 白/蓝/紫
-    ctx.fillStyle = rarC; ctx.font = 'bold 10px monospace'; ctx.textAlign = 'left';
+    const qc = qColor(u.q | 0); // v5.3 品质 5 档：绿蓝紫橙红（档越高越稀有）
+    ctx.fillStyle = qc; ctx.font = 'bold 11px monospace'; ctx.textAlign = 'left';
     const catN = { atk: '攻', surv: '守', ctrl: '控', res: '资' }[u.cat || 'atk'];
-    ctx.fillText(`${catN}·${{ R: '白', SR: '蓝', SSR: '紫' }[u.rar || 'R']}`, z.x + 8, z.y + 14);
-    if (u.gun) { ctx.textAlign = 'right'; ctx.fillStyle = WEAPONS[u.gun].c; ctx.fillText(WEAPONS[u.gun].name, z.x + z.w - 8, z.y + 14); ctx.textAlign = 'left'; } // v5.2 门禁P1：卡面标注归属枪
-    else if (BIO) { ctx.textAlign = 'right'; ctx.fillStyle = '#8a7a66'; ctx.fillText('通用', z.x + z.w - 8, z.y + 14); ctx.textAlign = 'left'; }
-    ctx.strokeStyle = rarC; ctx.lineWidth = 2;
+    ctx.fillText(`${catN}·${qName(u.q | 0)}`, z.x + 8, z.y + 16);
+    if (u.gun) { ctx.textAlign = 'right'; ctx.fillStyle = WEAPONS[u.gun].c; ctx.fillText(WEAPONS[u.gun].name, z.x + z.w - 8, z.y + 16); ctx.textAlign = 'left'; } // v5.2 门禁P1：卡面标注归属枪
+    else if (BIO) { ctx.textAlign = 'right'; ctx.fillStyle = '#8a7a66'; ctx.fillText('通用', z.x + z.w - 8, z.y + 16); ctx.textAlign = 'left'; }
+    ctx.strokeStyle = qc; ctx.lineWidth = 2.4;
     ctx.beginPath(); ctx.roundRect(z.x, z.y, z.w, z.h, 8); ctx.stroke();
-    // 字形徽记
     ctx.fillStyle = 'rgba(0,0,0,.35)';
     ctx.beginPath(); ctx.arc(z.x + z.w / 2, z.y + 62, 34, 0, TAU); ctx.fill();
     ctx.strokeStyle = u.c; ctx.lineWidth = 2.5;
@@ -1005,20 +1092,48 @@ function drawLevelUp(ctx, g) {
     ctx.fillText(u.name, z.x + z.w / 2, z.y + 140);
     ctx.fillStyle = '#a08a70'; ctx.font = '12px monospace';
     const toks = u.desc.match(/\d+(?:\.\d+)?%?|[A-Za-z]+|./g) || []; // v5.1.1：按数字/字母词断行，不再拆碎 "+0.3"
-    let line = '', ly = z.y + 168;
+    let line = '', ly = z.y + 166, clipped = false;
     for (const tk of toks) {
-      if (line && ctx.measureText(line + tk).width > z.w - 28) {
+      if (line && ctx.measureText(line + tk).width > z.w - 24) {
         let carry = ''; // v5.1.1 复核P2：行尾不留孤悬符号（+ × - / （ 跟着数字走到下一行）
         while (line.length > 1 && '+×-/（('.includes(line.slice(-1))) { carry = line.slice(-1) + carry; line = line.slice(0, -1); }
-        ctx.fillText(line, z.x + z.w / 2, ly); line = carry + tk; ly += 18;
+        if (ly < z.y + 262) ctx.fillText(line, z.x + z.w / 2, ly); else clipped = true; // 超出 6 行截断，给下方阶梯行留位
+        ly += 17; line = carry + tk;
       }
       else line += tk;
     }
-    ctx.fillText(line, z.x + z.w / 2, ly);
-    ctx.fillStyle = '#6b5340'; ctx.font = '11px monospace';
-    ctx.fillText(`Lv ${lv} → ${lv + 1} / 上限 ${u.max}`, z.x + z.w / 2, z.y + z.h - 34);
-    ctx.fillStyle = u.c; ctx.font = 'bold 14px monospace';
+    if (clipped) ctx.fillText('…', z.x + z.w / 2, Math.min(ly, z.y + 276));
+    else if (ly < z.y + 280) ctx.fillText(line, z.x + z.w / 2, ly);
+    // v5.3 阶梯可视化：同名技能按品质升档，高档替换低档（不叠加）
+    const mw = Math.min(z.w - 24, 5 * 14);
+    drawQMeter(ctx, z.x + z.w / 2 - mw / 2, z.y + 300, u.q | 0, mw / 5);
+    ctx.fillStyle = '#6b5340'; ctx.font = '11px monospace'; ctx.textAlign = 'center';
+    ctx.fillText(`第 ${(u.q | 0) + 1}/5 档`, z.x + z.w / 2, z.y + 322);
+    ctx.fillStyle = '#8a7360';
+    ctx.fillText(u.isFam
+      ? (u.prev < 0 ? '尚未持有 → 首得' : `${qName(u.prev)} 升 ${qName(u.q | 0)}（替换不叠加）`)
+      : `Lv ${lv} → ${lv + 1} / 上限 ${u.max}`, z.x + z.w / 2, z.y + 344);
+    ctx.fillStyle = qc; ctx.font = 'bold 14px monospace';
     ctx.fillText('[' + (i + 1) + ']', z.x + z.w / 2, z.y + z.h - 14);
+  });
+  // v5.3 用户反馈"选的时候要知道自己已有什么"：已持有面板
+  const owned = ownedSkillLines(g.player);
+  const oy = zones.length ? zones[0].y + zones[0].h + 26 : 590;
+  ctx.textAlign = 'left'; ctx.fillStyle = '#8a7360'; ctx.font = 'bold 12px monospace';
+  ctx.fillText(owned.length ? `已 持 有（${owned.length}）` : '已 持 有：暂时无技能', 24, oy);
+  owned.slice(0, 10).forEach((o, i) => { // 2 列 × 5 行为上限，再底就撞 toast（y=CANVAS_H-170）
+    const col = i % 2, row = (i / 2) | 0, cw = (CANVAS_W - 48) / 2;
+    const x = 24 + col * cw, y = oy + 20 + row * 26;
+    if (y > CANVAS_H - 26) return; // 超出一屏的行数留待后续版本做滚动
+    const label = `${o.name}${o.stacks ? ` ×${o.stacks}/${o.max}` : ''}`;
+    ctx.fillStyle = qColor(o.tier); ctx.font = 'bold 12px monospace';
+    ctx.fillText(qName(o.tier), x, y);
+    ctx.fillStyle = '#d9c9a8';
+    ctx.fillText(label, x + 26, y);
+    const lw = ctx.measureText(label).width; // 仍以 12px 字体测量，换字号前取宽度
+    ctx.fillStyle = '#6b5a4a'; ctx.font = '10px monospace';
+    ctx.fillText(o.tag, x + 34 + lw, y);
+    drawQMeter(ctx, x + cw - 76, y - 8, o.tier, 14);
   });
   ctx.restore();
 }
@@ -1090,22 +1205,25 @@ function drawCraft(ctx, g) {
   ctx.fillStyle = '#e8c85e'; ctx.font = 'bold 20px monospace'; ctx.textAlign = 'center';
   ctx.fillText('武 器 合 成', CANVAS_W / 2, 52);
   ctx.fillStyle = '#a8937c'; ctx.font = '11px monospace';
-  ctx.fillText(`材料：废铁×${m.mats.iron} 生化芯×${m.mats.core} · 金币${m.coins} · 品质每档 +15% 伤害并解锁词条`, CANVAS_W / 2, 76);
+  ctx.fillText(`材料：废铁×${m.mats.iron} 生化芯×${m.mats.core} · 金币${m.coins} · 品质档 = 出身 + 强化，每档 +10% 伤害`, CANVAS_W / 2, 76);
   ctx.fillStyle = '#8a7a66'; ctx.font = '10px monospace';
-  ctx.fillText('词条：精良=暴击25% · 稀有=击退强化 · 传说=穿透/大弧', CANVAS_W / 2, 94);
+  ctx.fillText('品质档：绿 → 蓝 → 紫 → 橙 → 红 ｜ 词条：紫档起 暴击25%×1.8 · 橙档起 近战弧光 +0.6', CANVAS_W / 2, 94);
   const owned = Object.keys(WEAPONS).filter(weaponOwned);
   owned.forEach((wid, i) => {
-    const z = craftRowZone(i), w = WEAPONS[wid], q = (m.wq || {})[wid] || 0;
+    const z = craftRowZone(i), w = WEAPONS[wid], q = gunWq(wid), t = gunTier(wid);
     ctx.fillStyle = 'rgba(22,16,10,.92)';
     ctx.beginPath(); ctx.roundRect(z.x, z.y, z.w, z.h, 7); ctx.fill();
-    ctx.strokeStyle = WQ_C[q]; ctx.lineWidth = 1.4;
+    ctx.strokeStyle = qColor(t); ctx.lineWidth = 1.4;
     ctx.beginPath(); ctx.roundRect(z.x, z.y, z.w, z.h, 7); ctx.stroke();
     ctx.textAlign = 'left'; ctx.fillStyle = w.c; ctx.font = 'bold 14px monospace';
     ctx.fillText(`${w.glyph} ${w.name}`, z.x + 12, z.y + 26);
-    ctx.fillStyle = WQ_C[q]; ctx.font = '11px monospace';
-    ctx.fillText('★'.repeat(q + 1) + '☆'.repeat(3 - q) + ' ' + WQ_NAMES[q], z.x + 12, z.y + 48);
+    ctx.fillStyle = qColor(t); ctx.font = 'bold 11px monospace';
+    ctx.fillText(`【${qName(t)}】`, z.x + 12, z.y + 48);
+    drawQMeter(ctx, z.x + 12 + ctx.measureText(`【${qName(t)}】`).width + 8, z.y + 40, q - 1, 13); // 强化级用计量条，11px 星号在手机上糊成一排
+    ctx.fillStyle = '#8a7a66'; ctx.font = '10px monospace';
+    ctx.fillText(`强化${q}/${WQ_MAX}`, z.x + 12 + ctx.measureText(`【${qName(t)}】`).width + 8 + 5 * 13 + 6, z.y + 48);
     const bz = craftBtnZone(i);
-    if (q >= 3) {
+    if (q >= WQ_MAX) {
       ctx.fillStyle = '#3a5a3a'; ctx.beginPath(); ctx.roundRect(bz.x, bz.y, bz.w, bz.h, 6); ctx.fill();
       ctx.fillStyle = '#7fae5a'; ctx.font = 'bold 12px monospace'; ctx.textAlign = 'center';
       ctx.fillText('已满', bz.x + bz.w / 2, bz.y + 28);
@@ -1357,15 +1475,16 @@ function drawTouchUI(ctx, t) {
     let ox = st ? st.ox : dx, oy = st ? st.oy : dy;
     // 玩家反馈摇杆挡视线：按住时视觉锚点整体下移（拇指不再压住瞄准线/战场），待机幽灵圈减淡缩小
     if (st && drop) oy = Math.min(CANVAS_H - 44, oy + 56);
-    ctx.globalAlpha = st ? .3 : .15;
+    // 用户反馈"找不到移动摇杆"：待机幽灵圈从 .15 提到 .28，并按左右手设置出现在对应半屏
+    ctx.globalAlpha = st ? .3 : .28;
     ctx.strokeStyle = '#e0d0b8'; ctx.lineWidth = 2.4;
-    ctx.beginPath(); ctx.arc(ox, oy, st ? 46 : 40, 0, TAU); ctx.stroke();
+    ctx.beginPath(); ctx.arc(ox, oy, st ? 46 : 44, 0, TAU); ctx.stroke();
     const kx = st ? ox + clamp(st.x - ox, -34, 34) : ox;
     const ky = st ? oy + clamp(st.y - oy, -34, 34) : oy;
-    ctx.fillStyle = '#e0d0b8';
+    ctx.globalAlpha = st ? 1 : .5; ctx.fillStyle = '#e0d0b8';
     ctx.beginPath(); ctx.arc(kx, ky, st ? 18 : 15, 0, TAU); ctx.fill();
   };
-  base(Touch.sticks.move, BIO ? 110 : 110, CANVAS_H - (BIO ? 150 : 100), false);
+  base(Touch.sticks.move, BIO ? Touch.ghostX() : 110, CANVAS_H - (BIO ? 150 : 100), false);
   if (!BIO) base(Touch.sticks.aim, VIEW_W - 160, CANVAS_H - 100, true);
   if (BIO) { // 主动技能按钮列 + 背包：圆形按钮 + 冷却扇形
     const p = game.player;

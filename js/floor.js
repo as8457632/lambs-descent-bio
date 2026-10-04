@@ -157,6 +157,107 @@ function roomCenterFree(room, tx, ty) {
 }
 
 // 进入房间时生成内容（岩石、便便、敌人、Boss、道具）
+// ── v5.3 房间战力预算（用户反馈：关卡之间要有差异；后期靠"怪更硬、更多"，而不是让玩家挨更多打）──
+// 每种怪按能力定分数 CP = 基血 × 威胁系数 ÷ 10；远程怪分数≈近战 2.4 倍，低预算房自然"买不起"
+const MOB_THREAT = {
+  fly: 1.0, attackfly: 1.3, gaper: 1.15, spider: 1.35, hopper: 1.5, splitter: 1.9, minifly: .8,
+  bat: 1.4, bone: 1.5, glasp: 1.79, // 格拉斯波：坦克，受击减伤 30% → 等效血 ×1.43
+  pooter: 2.6, turret: 2.4, spreader: 3.0, ghost: 2.8, mushroom: 2.2, eye: 2.6, // 远程弹幕：压制走位
+};
+const RANGED_MOBS = new Set(['pooter', 'turret', 'spreader', 'ghost', 'mushroom', 'eye']);
+const MOB_POOLS = [
+  ['fly', 'fly', 'attackfly', 'gaper', 'gaper', 'spider', 'bat', 'hopper'],
+  ['fly', 'attackfly', 'attackfly', 'gaper', 'pooter', 'spider', 'hopper', 'splitter', 'turret', 'ghost', 'bone', 'eye', 'bat', 'glasp'],
+  ['attackfly', 'attackfly', 'gaper', 'gaper', 'pooter', 'spider', 'hopper', 'splitter', 'splitter', 'turret', 'ghost', 'spreader', 'bone', 'eye', 'mushroom', 'glasp', 'glasp'],
+];
+const mobCP = (id, elite) => (BIO_HPBASE[id] || ETYPE[id].hp) * (MOB_THREAT[id] || 1) * (elite ? 2.4 : 1) / 10; // 保留小数：格拉斯波 35.8 不能被四舍五入成 4
+const SPAWN_WARN = 45; // 预警 0.75s：玩家看得见刷怪口再决定走位（用户："方便站位和走位"）
+// 本房预算：24 + 每关 +26 + 每房 +3.5，跨关只增不减（修掉旧版 statM 进新关归零的难度倒挂）
+// 首关前三个房序（r=1 是无怪起始房，实际护住 r2/r3 两个战斗房）×0.65：新手没枪先学走位
+const roomBudget = (stage, r) => Math.round((24 + 26 * (stage - 1) + 3.5 * (r - 1)) * (stage === 1 && r <= 3 ? .65 : 1));
+const hpScale = stage => Math.min(5.5, 1 + .55 * (stage - 1)); // 唯一血量乘区：只吃关卡，不吃房内序号
+const mobEliteChance = stage => Math.min(.38, .08 + .045 * (stage - 1) + (isGate(stage) ? .1 : 0));
+const spawnGapFrames = (stage, r) => Math.round(clamp(70 - 2 * stage - 1.5 * r, 26, 70));
+const aliveCapFor = room => Math.max(5, Math.min(10, Math.round(4 + (room.budget || 24) / 12)));
+// v5.3 箱色随关卡：关1-2 木70/蓝30，关3-4 木45/蓝40/紫15，关5+ 木25/蓝45/紫30
+function chestTierForStage(stage) {
+  const w = stage <= 2 ? [.70, .30] : stage <= 4 ? [.45, .40] : [.25, .45];
+  const r = Math.random();
+  return r < w[0] ? 'wood' : r < w[0] + w[1] ? 'blue' : 'purple';
+}
+// v5.3 修正：BIO 下 floorNum 恒为 1（通关只 +stage），怪池 tier 必须吃 stage，否则 tier2 永不可达、关与关怪种完全相同
+const mobPoolTier = (stageOrFloor, dist) => clamp((stageOrFloor | 0) - 1 + ((dist || 0) >= 3 ? 1 : 0), 0, 2);
+function buildSpawnQueue(room, floorNum) {
+  const stage = game.stage || 1, B = room.budget;
+  const tier = mobPoolTier(stage, room.dist);
+  const pool = MOB_POOLS[tier];
+  const melee = pool.filter(id => !RANGED_MOBS.has(id));
+  const ranged = pool.filter(id => RANGED_MOBS.has(id));
+  const ec = mobEliteChance(stage);
+  const mut = () => game.diffMutate && Math.random() < .3 ? (Math.random() < .5 ? 'armored' : 'slowshot') : null;
+  const q = [];
+  let used = 0, usedRanged = 0;
+  const meleeBudget = B * .78, totalBudget = B * 1.06;
+  const rangedCap = (stage === 1 && (room.dist || 0) <= 2) ? 0 : Math.max(B * .18, 13); // 首关前三个房序纯近战；浅预算房也留得下 1 只远程；深房按 18% 封顶
+  for (let guard = 0; guard < 120; guard++) { // 相位 1：近战铺底（贵怪买不起就换便宜的，别把整房饿死）
+    const elite = Math.random() < ec;
+    const can = melee.filter(id => mobCP(id, elite) <= meleeBudget - used);
+    if (!can.length) break;
+    const id = choice(can);
+    used += mobCP(id, elite);
+    q.push({ id, elite, mut: mut(), ranged: false });
+  }
+  for (let guard = 0; guard < 24 && ranged.length; guard++) { // 相位 2：远程点缀（近战之后才刷，玩家可放风筝）
+    const elite = Math.random() < ec * .5;
+    const room0 = Math.min(rangedCap - usedRanged, totalBudget - used);
+    const can = ranged.filter(id => mobCP(id, elite) <= room0);
+    if (!can.length) break;
+    const id = choice(can);
+    const cost = mobCP(id, elite);
+    used += cost; usedRanged += cost;
+    q.push({ id, elite, mut: mut(), ranged: true });
+  }
+  if (!q.length) q.push({ id: choice(melee), elite: false, mut: mut(), ranged: false }); // 四舍五入吃光预算也要有怪可打
+  q.sort((a, b) => (a.ranged ? 1 : 0) - (b.ranged ? 1 : 0)); // 出怪顺序：近战先、远程后
+  return q;
+}
+function pickSpawnPorts(room, entryX, entryY) {
+  const ports = [];
+  for (let i = 0; i < 3; i++) {
+    for (let t = 0; t < 24; t++) {
+      const x = rand(TILE * 1.4, WORLD_W - TILE * 1.4), y = rand(TILE * 1.4, WORLD_H - TILE * 1.4);
+      if (dist2(x, y, entryX, entryY) < 170 || dist2(x, y, WORLD_W / 2, WORLD_H / 2) < 60) continue;
+      if (room.solidTile(Math.floor(x / TILE), Math.floor(y / TILE))) continue;
+      if (ports.some(p => dist2(p.x, p.y, x, y) < 90)) continue;
+      ports.push({ x, y }); break;
+    }
+  }
+  if (!ports.length) ports.push({ x: WORLD_W / 2, y: TILE * 1.6 });
+  return ports;
+}
+// 每帧驱动：预警到期落怪 → 未满并发上限则从队列取下一只（远程满员先跳过取近战）
+function drainSpawnQueue(room, floorNum) {
+  for (let i = room.spawnPending.length - 1; i >= 0; i--) {
+    const w = room.spawnPending[i];
+    if (--w.t > 0) continue;
+    room.spawnPending.splice(i, 1);
+    const e = new Enemy(w.id, w.x, w.y, floorNum, { elite: w.elite, instant: true });
+    if (w.mut) e.mut = w.mut;
+    room.enemies.push(e);
+  }
+  if (!room.spawnQueue.length) return;
+  if (room.enemies.length + room.spawnPending.length >= aliveCapFor(room)) return; // 背压：场上够挤就压住队列
+  if (--room.spawnT > 0) return;
+  room.spawnT = room.spawnGap;
+  const maxRanged = (game.stage || 1) === 1 ? 2 : 3;
+  const fieldRanged = room.enemies.filter(e => !e.dead && RANGED_MOBS.has(e.cfg.id)).length + room.spawnPending.filter(w => w.ranged).length;
+  const idx = room.spawnQueue.findIndex(m => !m.ranged || fieldRanged < maxRanged);
+  if (idx < 0) return;
+  const m = room.spawnQueue.splice(idx, 1)[0];
+  const port = choice(room.spawnPorts);
+  room.spawnPending.push({ id: m.id, elite: m.elite, mut: m.mut, ranged: m.ranged, x: port.x, y: port.y, t: SPAWN_WARN });
+}
+
 function createRoomContents(room, floorNum, entryX, entryY) {
   if (room.generated) return;
   room.generated = true;
@@ -200,35 +301,41 @@ function createRoomContents(room, floorNum, entryX, entryY) {
       room.props.push({ kind: 'junk', x: tx * TILE + 24, y: ty * TILE + 24, hp: 5, maxHp: 5, dead: false, sp: theme.junk });
     }
     // 敌人
-    const pools = [
-      ['fly', 'fly', 'attackfly', 'gaper', 'gaper', 'spider', 'bat', 'hopper'],
-      ['fly', 'attackfly', 'attackfly', 'gaper', 'pooter', 'spider', 'hopper', 'splitter', 'turret', 'ghost', 'bone', 'eye', 'bat', 'glasp'],
-      ['attackfly', 'attackfly', 'gaper', 'gaper', 'pooter', 'spider', 'hopper', 'splitter', 'splitter', 'turret', 'ghost', 'spreader', 'bone', 'eye', 'mushroom', 'glasp', 'glasp'],
-    ];
+    const pools = MOB_POOLS;
     // 难度门控：远端房间用更强怪池；入口侧房间降血量，避免开局撞脸劝退
-    const tier = clamp(floorNum - 1 + ((room.dist || 0) >= 3 ? 1 : 0), 0, 2);
+    const tier = mobPoolTier(BIO ? (game.stage || 1) : floorNum, room.dist);
     const hpMul = BIO ? 1 : 0.55 + 0.12 * clamp(room.dist || 0, 0, 4); // v5.1.1：BIO 血线只吃文档公式（statM），隐藏浅房减免退出
-    // 配额制：3 屏大房间怪量翻倍；初始刷一批，波次补刷，杀满配额后残敌必须全清
-    room.quota = BIO ? Math.round(8 * (1 + .3 * ((room.dist || 0) + 1)) * (1 + .10 * ((game.stage || 1) - 1))) // 文档公式：第 N 房敌人数 = 基础×(1+0.3N)
-      : Math.round((12 + 7 * floorNum + Math.min(12, Math.floor(game.runTime / 3600) * 2)) * (0.55 + 0.15 * clamp(room.dist || 0, 0, 4)) * (1 + .10 * ((game.stage || 1) - 1)) * 10); // 用户实测反馈：怪量提 10 倍才够打
-    room.killed = 0;
-    room.spawnT = Math.max(50, 130 - 15 * floorNum);
     room.tier = tier; room.hpMul = hpMul;
-    const initial = BIO ? Math.min(room.quota, 3 + Math.ceil(((room.dist || 0) + 1) * .8)) : Math.min(room.quota, (4 + 2 * floorNum + randi(0, 3)) * 5);
-    for (let i = 0; i < initial; i++) {
-      let x, y, tries = 0;
-      do {
-        x = rand(TILE * 2, WORLD_W - TILE * 2);
-        y = rand(TILE * 2, WORLD_H - TILE * 2);
-        tries++;
-      } while (tries < 30 && (
-        dist2(x, y, entryX, entryY) < 150 ||
-        dist2(x, y, WORLD_W / 2, WORLD_H / 2) < 60 ||
-        room.solidTile(Math.floor(x / TILE), Math.floor(y / TILE))));
-      const e = new Enemy(choice(pools[tier]), x, y, floorNum);
-      e.hp = e.maxHp = Math.max(2, Math.ceil(e.hp * hpMul));
-      if (BIO && game.diffMutate && Math.random() < .3) e.mut = Math.random() < .5 ? 'armored' : 'slowshot'; // N6+ 突变词缀
-      room.enemies.push(e);
+    if (BIO) { // v5.3：战力预算 + 渐进刷怪（进房 0 怪，预警口一只只出）
+      const r = (room.dist || 0) + 1;
+      room.budget = roomBudget(game.stage || 1, r);
+      room.spawnQueue = buildSpawnQueue(room, floorNum);
+      room.spawnPending = [];
+      room.spawnPorts = pickSpawnPorts(room, entryX, entryY);
+      room.spawnT = 40; // 首只出现前的准备时间
+      room.spawnGap = spawnGapFrames(game.stage || 1, r);
+      room.quota = room.spawnQueue.length; // 清房口径不变：预算里的怪必须全清
+      room.killed = 0;
+    } else {
+      // 配额制：3 屏大房间怪量翻倍；初始刷一批，波次补刷，杀满配额后残敌必须全清
+      room.quota = Math.round((12 + 7 * floorNum + Math.min(12, Math.floor(game.runTime / 3600) * 2)) * (0.55 + 0.15 * clamp(room.dist || 0, 0, 4)) * (1 + .10 * ((game.stage || 1) - 1)) * 10); // 用户实测反馈：怪量提 10 倍才够打
+      room.killed = 0;
+      room.spawnT = Math.max(50, 130 - 15 * floorNum);
+      const initial = Math.min(room.quota, (4 + 2 * floorNum + randi(0, 3)) * 5);
+      for (let i = 0; i < initial; i++) {
+        let x, y, tries = 0;
+        do {
+          x = rand(TILE * 2, WORLD_W - TILE * 2);
+          y = rand(TILE * 2, WORLD_H - TILE * 2);
+          tries++;
+        } while (tries < 30 && (
+          dist2(x, y, entryX, entryY) < 150 ||
+          dist2(x, y, WORLD_W / 2, WORLD_H / 2) < 60 ||
+          room.solidTile(Math.floor(x / TILE), Math.floor(y / TILE))));
+        const e = new Enemy(choice(pools[tier]), x, y, floorNum);
+        e.hp = e.maxHp = Math.max(2, Math.ceil(e.hp * hpMul));
+        room.enemies.push(e);
+      }
     }
     room.hasEnemiesPlanned = true;
   }
@@ -289,7 +396,7 @@ function createRoomContents(room, floorNum, entryX, entryY) {
     }
     const ch = new Pickup('chest', bx, by); ch.bioInit = true;
     ch.tier = room.type === 'boss' ? 'purple' : room.type === 'treasure' ? 'blue' : room.type === 'start' ? 'wood'
-      : (Math.random() < .05 ? 'purple' : Math.random() < .3 ? 'blue' : 'wood'); // v5.2.2：箱色=掉落表品质
+      : chestTierForStage(game.stage || 1); // v5.3：箱色随关卡上移（高级货后期才见，与技能品质门控同调）
     room.pickups.push(ch);
   }
 
@@ -321,7 +428,7 @@ function waveSpawn(room, floorNum) {
     ['attackfly', 'gaper', 'pooter', 'bone', 'eye', 'bat', 'hopper', 'mushroom'],
     ['attackfly', 'gaper', 'splitter', 'bone', 'eye', 'ghost', 'turret', 'bat', 'spreader'],
   ];
-  const n = BIO ? randi(2, 3) : randi(4, 6);
+  const n = randi(4, 6); // v5.3：BIO 补刷改走 drainSpawnQueue（预算队列 + 预警口），此函数仅桌面模式使用
   for (let i = 0; i < n; i++) {
     let x, y, tries = 0;
     do {
