@@ -266,6 +266,13 @@ function drawTear(ctx, tr, t) {
 
 // ── 武器特效与反馈：激光束 / 闪电链 / 冲刺残影 / 枪口火光 / 抛壳 / 命中火花 / 死亡烟圈 ──
 function drawFx(ctx, g) {
+  for (const f of g.fx) if (f.type === 'dropbeam') { // v5.2.2 开箱武器光柱
+    ctx.globalAlpha = clamp(f.t / f.t0, 0, 1) * .8;
+    const gg = ctx.createLinearGradient(0, f.y - 74, 0, f.y);
+    gg.addColorStop(0, 'rgba(0,0,0,0)'); gg.addColorStop(1, f.col);
+    ctx.fillStyle = gg; ctx.fillRect(f.x - 13, f.y - 74, 26, 74);
+    ctx.globalAlpha = 1;
+  }
   for (const f of g.fx) {
     ctx.save();
     const k = f.t0 ? clamp(f.t / f.t0, 0, 1) : clamp(f.t / 9, 0, 1);
@@ -430,27 +437,33 @@ function drawPickup(ctx, pk, t) {
       ctx.strokeStyle = '#8a6b5a'; ctx.lineWidth = 1.5; ctx.stroke();
       ctx.fillStyle = '#c4303a'; ctx.fillRect(-2.2, -5.5, 4.4, 11); ctx.fillRect(-6.5, -2.2, 13, 4.4);
       break; }
-    case 'skill': { // v5.2 技能卡：品质描边小卡 + 字形
-      const u = pk.item && pk.item.u; const rc = u && u.rar === 'SSR' ? '#b093e8' : u && u.rar === 'SR' ? '#7fb2e8' : '#cfc6b8';
-      ctx.fillStyle = '#1a130d'; ctx.beginPath(); ctx.roundRect(-11, -14, 22, 28, 3); ctx.fill();
-      ctx.strokeStyle = rc; ctx.lineWidth = 2; ctx.stroke();
-      ctx.fillStyle = (u && u.c) || '#e8c85e'; ctx.font = 'bold 14px monospace'; ctx.textAlign = 'center';
-      ctx.fillText((u && u.glyph) || '技', 0, 4);
-      ctx.fillStyle = rc; ctx.font = 'bold 8px monospace'; ctx.fillText('技能', 0, 22);
-      ctx.textAlign = 'left'; break; }
     case 'coin':
       ctx.fillStyle = '#d9a92e'; ctx.beginPath(); ctx.arc(0, 0, 9, 0, TAU); ctx.fill();
       ctx.strokeStyle = '#9a7517'; ctx.lineWidth = 2; ctx.stroke();
       ctx.fillStyle = '#f5d873'; ctx.beginPath(); ctx.arc(-2.5, -2.5, 4, 0, TAU); ctx.fill();
       break;
-    case 'chest':
+    case 'chest': {
+      const tc = pk.tier === 'purple' ? '#b093e8' : pk.tier === 'blue' ? '#7fb2e8' : '#d9a92e'; // v5.2.2 箱色=品质
+      if (pk.tier && pk.tier !== 'wood') { // 品质箱光晕
+        const gl = ctx.createRadialGradient(0, 0, 4, 0, 0, 34);
+        gl.addColorStop(0, tc + '55'); gl.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = gl; ctx.beginPath(); ctx.arc(0, 0, 34, 0, TAU); ctx.fill();
+      }
       ctx.fillStyle = '#7a4c26'; ctx.beginPath(); ctx.roundRect(-13, -6, 26, 18, 3); ctx.fill();
       ctx.fillStyle = '#9a6432'; ctx.beginPath(); ctx.roundRect(-13, -12, 26, 8, 3); ctx.fill();
-      ctx.strokeStyle = '#d9a92e'; ctx.lineWidth = 2.5;
+      ctx.strokeStyle = tc; ctx.lineWidth = 2.5;
       ctx.strokeRect(-13, -12, 26, 24);
       ctx.beginPath(); ctx.moveTo(0, -12); ctx.lineTo(0, 12); ctx.stroke();
       ctx.fillStyle = '#e8c85e'; ctx.beginPath(); ctx.arc(0, -1, 3.5, 0, TAU); ctx.fill();
-      break;
+      if (pk.openingT > 0) { // 开箱加载绿圈（参考原作）
+        const k = 1 - pk.openingT / 54;
+        ctx.strokeStyle = 'rgba(20,40,20,.7)'; ctx.lineWidth = 4;
+        ctx.beginPath(); ctx.arc(0, -26, 9, 0, TAU); ctx.stroke();
+        ctx.strokeStyle = '#5ad06a'; ctx.lineWidth = 4;
+        ctx.beginPath(); ctx.arc(0, -26, 9, -Math.PI / 2, -Math.PI / 2 + TAU * k); ctx.stroke();
+      } else if (!pk.dead) ctx.fillStyle = '#cbb59a', ctx.font = 'bold 9px monospace', ctx.textAlign = 'center',
+        ctx.fillText(pk.tier === 'purple' ? '紫箱' : pk.tier === 'blue' ? '蓝箱' : '宝箱', 0, 26), ctx.textAlign = 'left';
+      break; }
     case 'item': case 'weapon':
       // 光晕 + 悬浮道具/武器
       const wcol = pk.kind === 'weapon' ? WEAPONS[pk.wid].c : itemColor(pk.item);
@@ -886,14 +899,86 @@ function levelCardZones() {
 }
 
 // ── 升级三选一界面 ──
+// v5.2.2 头顶生命条 + 弹丸（参考原作：几发子弹头顶可见）
+function drawHeadHud(ctx, p, t) {
+  if (!p) return;
+  const hw = 30;
+  ctx.fillStyle = 'rgba(10,8,6,.62)'; ctx.fillRect(p.x - hw / 2 - 1, p.y - 42, hw + 2, 6);
+  ctx.fillStyle = p.hp / Math.max(1, p.maxHp) <= .25 ? '#c4303a' : '#7fae5a';
+  ctx.fillRect(p.x - hw / 2, p.y - 41, hw * clamp(p.hp / Math.max(1, p.maxHp), 0, 1), 4);
+  const w = WEAPONS[p.weapon.id], cm = p.clipMax();
+  if (!w.clip || cm <= 0) return;
+  const a = Math.max(0, p.ammo), gap = 7, x0 = p.x - (cm - 1) * gap / 2, yy = p.y - 30;
+  for (let i = 0; i < cm; i++) {
+    ctx.beginPath(); ctx.arc(x0 + i * gap, yy, 2.7, 0, TAU);
+    ctx.fillStyle = i < a ? (RAR_C[(WEAPONS[p.weapon.id]).rar] || '#cfc6b8') : 'rgba(110,100,90,.5)';
+    ctx.fill(); ctx.strokeStyle = 'rgba(8,6,4,.75)'; ctx.lineWidth = 1; ctx.stroke();
+  }
+  if (p.reloadT > 0) {
+    ctx.strokeStyle = '#e8c85e'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(x0 - 12, yy, 5.5, -Math.PI / 2, -Math.PI / 2 + TAU * (1 - p.reloadT / p.reloadDur())); ctx.stroke();
+  }
+}
+// v5.2.2 武器详情卡（参考原作：装备前先看卡）
+function wcheckZones() {
+  return [
+    { x: CANVAS_W / 2 - 172, y: 560, w: 160, h: 50 },
+    { x: CANVAS_W / 2 + 12, y: 560, w: 160, h: 50 },
+  ];
+}
+function drawWeaponCheck(ctx, g) {
+  const pk = g.wcheck && g.wcheck.pk; if (!pk) return;
+  const wd = WEAPONS[pk.wid], p = g.player;
+  const RARN = { SSR: '传说', SR: '稀有', R: '精良', null: '普通' };
+  const rc = pk.wid === 'tear' ? '#cfc6b8' : WEAPONS[pk.wid].rar === 'SSR' ? '#b093e8' : WEAPONS[pk.wid].rar === 'SR' ? '#7fb2e8' : '#7fae5a';
+  const cur = p.weapon;
+  p.weapon = { id: pk.wid, lvl: 1 };
+  const atk = Math.round(weaponDmg(p, wd)), rng = Math.round(weaponRange(p));
+  p.weapon = cur;
+  ctx.save();
+  ctx.fillStyle = 'rgba(6,4,3,.78)'; ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+  const cx0 = CANVAS_W / 2, cy0 = 330;
+  ctx.fillStyle = '#1a130d'; ctx.beginPath(); ctx.roundRect(cx0 - 196, cy0 - 150, 392, 300, 10); ctx.fill();
+  ctx.strokeStyle = rc; ctx.lineWidth = 2; ctx.beginPath(); ctx.roundRect(cx0 - 196, cy0 - 150, 392, 300, 10); ctx.stroke();
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#f0e6d8'; ctx.font = 'bold 22px monospace';
+  ctx.fillText(wd.name, cx0, cy0 - 108);
+  ctx.fillStyle = rc; ctx.font = 'bold 13px monospace';
+  ctx.fillText(`[${RARN[wd.rar || 'null']}]  ${wd.melee ? '近战' : '远程'}`, cx0, cy0 - 84);
+  ctx.fillStyle = '#d9c9a8'; ctx.font = 'bold 15px monospace'; ctx.textAlign = 'left';
+  const rows = [
+    ['等级', '1 级（入手后同枪再捡升级）'],
+    ['攻击力', `${atk}`],
+    ['攻击范围', `${rng}`],
+    ['充能速度', `${(60 / Math.max(4, wd.cd)).toFixed(1)} 次/秒`],
+    ['弹药', wd.clip ? `${wd.clip} 发 · 装填 ${(wd.rl / 60).toFixed(1)} 秒` : '近战 · 不耗弹'],
+  ];
+  rows.forEach((r, i) => {
+    ctx.fillStyle = '#8a7a66'; ctx.fillText(r[0], cx0 - 150, cy0 - 50 + i * 30);
+    ctx.fillStyle = '#f0e6d8'; ctx.fillText(r[1], cx0 - 40, cy0 - 50 + i * 30);
+  });
+  ctx.fillStyle = '#a08a70'; ctx.font = '12px monospace'; ctx.textAlign = 'center';
+  ctx.fillText(wd.desc + (p.weapon.id !== pk.wid ? `（现持：${cur.id === pk.wid ? '' : WEAPONS[cur.id].name}，更换后等级归 1）` : ''), cx0, cy0 + 112);
+  const z = wcheckZones();
+  [{ t: '装 备  [1]', on: true }, { t: '不 换  [2]', on: false }].forEach((b, i) => {
+    ctx.fillStyle = b.on ? 'rgba(46,84,52,.95)' : 'rgba(38,28,20,.92)';
+    ctx.beginPath(); ctx.roundRect(z[i].x, z[i].y, z[i].w, z[i].h, 8); ctx.fill();
+    ctx.strokeStyle = b.on ? '#7fae5a' : '#6b5a48'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.roundRect(z[i].x, z[i].y, z[i].w, z[i].h, 8); ctx.stroke();
+    ctx.fillStyle = '#f0e2c0'; ctx.font = 'bold 16px monospace';
+    ctx.fillText(b.t, z[i].x + z[i].w / 2, z[i].y + 31);
+  });
+  ctx.restore();
+}
+// v5.2.1 开箱选技能界面（原升级三选一 UI 复用）
 function drawLevelUp(ctx, g) {
   ctx.save();
   ctx.fillStyle = 'rgba(8,4,3,.82)'; ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
   ctx.fillStyle = '#e8c85e'; ctx.font = 'bold 26px monospace'; ctx.textAlign = 'center';
-  ctx.fillText(`升 级 ！ Lv ${g.player.level}`, CANVAS_W / 2, 106);
+  ctx.fillText('宝 箱 · 选 择 技 能', CANVAS_W / 2, 106);
   ctx.fillStyle = '#8a7360'; ctx.font = '12px monospace';
   const nCards = (g.levelChoices || []).length; // v5.1.1：按实际卡数提示（四选一显示 1/2/3/4）
-  ctx.fillText(`选择一项强化（按 ${Array.from({ length: nCards }, (_, i) => i + 1).join(' / ')} 或点击卡片）`, CANVAS_W / 2, 124);
+  ctx.fillText(`选择一项技能（按 ${Array.from({ length: nCards }, (_, i) => i + 1).join(' / ')} 或点击卡片）—— 卡池来自当前武器`, CANVAS_W / 2, 124);
   const zones = levelCardZones();
   g.levelChoices.forEach((u, i) => {
     const z = zones[i], lv = g.player.gunLvOf(u);
@@ -901,10 +986,10 @@ function drawLevelUp(ctx, g) {
     ctx.fillStyle = hov ? '#241a12' : '#1a130d';
     ctx.beginPath(); ctx.roundRect(z.x, z.y, z.w, z.h, 8); ctx.fill();
     // v5.1 文档 4.1：品质边框 白/蓝/紫 + 四方向角标
-    const rarC = u.rar === 'SSR' ? '#b093e8' : u.rar === 'SR' ? '#7fb2e8' : '#7fae5a'; // v5.2 门禁P1：卡框色与 RAR_C 四级统一（绿/蓝/紫）
+    const rarC = u.rar === 'SSR' ? '#b093e8' : u.rar === 'SR' ? '#7fb2e8' : '#cfc6b8'; // v5.2.1 文档口径：技能品质 白/蓝/紫
     ctx.fillStyle = rarC; ctx.font = 'bold 10px monospace'; ctx.textAlign = 'left';
     const catN = { atk: '攻', surv: '守', ctrl: '控', res: '资' }[u.cat || 'atk'];
-    ctx.fillText(`${catN}·${{ R: '绿', SR: '蓝', SSR: '紫' }[u.rar || 'R']}`, z.x + 8, z.y + 14);
+    ctx.fillText(`${catN}·${{ R: '白', SR: '蓝', SSR: '紫' }[u.rar || 'R']}`, z.x + 8, z.y + 14);
     if (u.gun) { ctx.textAlign = 'right'; ctx.fillStyle = WEAPONS[u.gun].c; ctx.fillText(WEAPONS[u.gun].name, z.x + z.w - 8, z.y + 14); ctx.textAlign = 'left'; } // v5.2 门禁P1：卡面标注归属枪
     else if (BIO) { ctx.textAlign = 'right'; ctx.fillStyle = '#8a7a66'; ctx.fillText('通用', z.x + z.w - 8, z.y + 14); ctx.textAlign = 'left'; }
     ctx.strokeStyle = rarC; ctx.lineWidth = 2;
@@ -1087,7 +1172,6 @@ function drawSidePanel(ctx, g) {
   ctx.fillStyle = 'rgba(107,83,64,.25)';
   ctx.beginPath(); ctx.roundRect(x0 + 12, 247, PANEL_W - 24, 3, 1.5); ctx.fill();
   ctx.fillStyle = '#5a8ab0';
-  ctx.beginPath(); ctx.roundRect(x0 + 12, 247, Math.max(3, (PANEL_W - 24) * clamp(p.xp / p.xpNext, 0, 1)), 3, 1.5); ctx.fill();
   // 金币存量
   ctx.fillStyle = '#b093e8'; ctx.font = '10px monospace'; ctx.textAlign = 'right';
   ctx.fillText(`金币 ${Meta.load().coins}`, x0 + PANEL_W - 12, 82);

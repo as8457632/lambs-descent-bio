@@ -269,8 +269,6 @@ const UPGRADES = [
     apply(p) { p.upLv.execute = 1; } },
   { id: 'adrenaline', name: '肾上腺素', desc: '击杀后 2 秒移速 +30%', max: 1, c: '#e8a83a', glyph: '肾', cat: 'res', rar: 'SSR',
     apply(p) { p.upLv.adrenaline = 1; } },
-  { id: 'siphon',    name: '经验虹吸', desc: '经验获取 +25%', max: 1, c: '#b093e8', glyph: '吸', cat: 'res', rar: 'SSR',
-    apply(p) { p.upLv.siphon = 1; } },
 ];
 
 // ── 玩家：移动 / 瞄准 / 射击 / 经验 ──
@@ -294,7 +292,7 @@ class Player {
       { id: 'dashstrike', glyph: '冲', cd: 0, cdMax: 120, unlocked: true },
     ];
     this.gunLv = {}; // v5.2 枪技能：{gunId:{cardId:次数}}，只对当前持枪生效
-    this.level = 1; this.xp = 0; this.xpNext = 8; this.upLv = {};
+    this.level = 1; this.upLv = {}; // v5.2.1：经验体系移除，技能=清房开箱
     this.inv = 0; this.cd = 0; this.q = [];
     this.vx = 0; this.vy = 0; this.chainT = 0; this.zing = 0; this.stillT = 0; this.slowT = 0; this.stunT = 0; // v4.0 特区状态 + v5.1 减速/眩晕
     this.aim = { x: 0, y: 1 }; this.moving = false; this.anim = 0;
@@ -709,7 +707,7 @@ const ETYPE = {
   glasp:     { id: 'glasp',     label: '格拉斯波', hp: 34, r: 20, spd: .55, dmg: 3, ai: 'chase' }, // 文档坦克：慢、厚、受击减伤 30%
 };
 // v5.1.1 文档血线基线（仅 BIO 生效）：行尸 50 / 格拉斯波 200，其余按文档定位等比
-const BIO_HPBASE = { fly: 18, attackfly: 26, gaper: 50, pooter: 40, spider: 26, hopper: 34, splitter: 48, minifly: 12, turret: 52, spreader: 44, ghost: 42, bat: 30, mushroom: 40, bone: 38, eye: 36, glasp: 200 };
+const BIO_HPBASE = { fly: 18, attackfly: 55, gaper: 50, pooter: 40, spider: 26, hopper: 34, splitter: 48, minifly: 12, turret: 52, spreader: 44, ghost: 42, bat: 30, mushroom: 40, bone: 38, eye: 36, glasp: 200 };
 const ELITE_CHANCE = [0.14, 0.22, 0.30];
 
 class Enemy {
@@ -754,7 +752,6 @@ class Enemy {
         if (pl.weapon.id === 'reaper' && pl.gl('rp_harv')) pl.heal(4); // v5.2 收割
       }
       if (room.quota && !room.cleared && this.cfg.id !== 'minifly') room.killed++; // 分裂仔喂配额会让"真怪"提前清零，不计
-      game.gainXp(Math.ceil(2 + this.maxHp / 30)); // v5.2 门禁P1：经验再收敛（浅房 1-2 级、深房 3-5 级）
       game.runCoins += 2; game.runEarned += 2; if (!BIO) Meta.add(2); // 搜打撤：局内所得活着带走
       if (BIO && Math.random() < .12) room.pickups.push(new Pickup('loot', this.x, this.y, choice(LOOT)));
       if (this.elite) { // 精英必掉 1 资源 + 必掉 1 合成材料；v5.2：心废除，15% 掉药膏
@@ -948,7 +945,7 @@ class Boss {
     this.cfg = cfg;
     this.x = x; this.y = y; this.r = cfg.r;
     this.hp = Math.ceil(cfg.hp * (1 + .18 * (floorNum - 1)) * (game.statM || 1));
-    if (BIO) this.hp = this.maxHp = Math.ceil(this.hp * (game.statM || 1)); // v5.2 门禁P1：BIO 关底血吃文档房间倍率（房8 ×3）
+    if (BIO) this.hp = this.maxHp = Math.ceil(1500 * (game.diffHp || 1)); // v5.2.1 文档基线：杜尔加 1500 血（吃难度倍率；房间倍率只作用于小怪）
     this.maxHp = this.hp;
     this.affix = isGate(game.stage || 1) ? choice(['rage', 'barrage', 'summon']) : null; // 门槛关 Boss 词缀
     this.dead = false; this.flash = 0; this.phase2 = false;
@@ -1088,6 +1085,7 @@ class Pickup {
     this.kind = kind; this.x = x; this.y = y; this.item = item; this.price = price; this.wid = wid;
     this.r = kind === 'chest' ? 16 : kind === 'extract' ? 20 : 12;
     this.dead = false; this.taken = false; this.denyCd = 0;
+    this.tier = null; this.openingT = 0; // v5.2.2 宝箱：箱色品质（木/蓝/紫）+ 开启加载帧
   }
   // 武器拾取：换装或升级
   takeWeapon(p) {
@@ -1116,6 +1114,23 @@ class Pickup {
       }
     }
     if (this.denyCd > 0) this.denyCd--;
+    // v5.2.2 宝箱（参考原作）：站到附近即可开启，绿圈加载 0.9s 后爆出多件随机物；清房前锁定
+    if (this.kind === 'chest') {
+      if (BIO) {
+        if (this.openingT > 0) { if (--this.openingT <= 0) game.openChestLoot(room, this); return; }
+        if (d < 58) {
+          if (this.bioInit && room.type !== 'start' && room.type !== 'boss' && room.enemies.some(e => !e.dead)) {
+            if (!room.denyT || game.runTime - room.denyT > 60) { room.denyT = game.runTime; SFX.play('deny'); game.hint = { text: '还有敌人在场！清光它们宝箱才能打开', t: 130 }; }
+            return;
+          }
+          this.openingT = 54; SFX.play('doorOpen');
+          spawnParticles(room, this.x, this.y, 8, '#e8c85e', 2.5);
+        }
+        return;
+      }
+      if (d < this.r + p.r * .7) openChest(room, this); // 主线沿用接触开箱
+      return;
+    }
     // 商店货：先付钱后拾取
     if (this.price > 0) {
       if (d < this.r + p.r * .7) {
@@ -1136,20 +1151,20 @@ class Pickup {
           p.heal(40); SFX.play('heal'); this.dead = true;
           game.toast = { item: { name: '使用药膏', desc: '回复 40 生命', color: '#e88a7a' }, t: 110 }; break;
         case 'coin': if (BIO) { game.runCoins++; game.runEarned++; } else p.coins++; SFX.play('coin'); this.dead = true; break;
-        case 'skill': // v5.2 藏品室直出技能卡
-          game.grantSkill(this.item.u); this.dead = true; break;
         case 'item':
           p.applyItem(this.item); SFX.play('item'); this.dead = true;
           game.toast = { item: this.item, t: 200 };
           if (this.win) game.victory();
           break;
-        case 'weapon':
+        case 'weapon': {
+          if (BIO && p.weapon.id !== this.wid && this.denyCd <= 0 && !this.win) { // v5.2.2 换枪=详情卡确认（同枪自动升级）
+            game.wcheck = { pk: this }; game.state = 'wcheck'; SFX.play('item');
+            break;
+          }
           this.takeWeapon(p);
           if (this.win) game.victory(); // 最终宝箱可能出武器，通关标记不能丢
           break;
-        case 'chest':
-          openChest(room, this); // 钥匙已退役：碰到即开（冲刺撞开更快）
-          break;
+        }
         case 'extract':
           game.retreat(); // 撤离：本局结束，金币落袋
           break;
@@ -1171,17 +1186,10 @@ class Pickup {
 }
 
 // 宝箱开启（接触或冲刺撞开，无钥匙门槛）
-function openChest(room, c) {
+function openChest(room, c) { // 主线口径（BIO 宝箱走 openChestLoot）
   const p = game.player;
   SFX.play('doorOpen'); c.dead = true;
   spawnParticles(room, c.x, c.y, 14, '#e8c85e', 3);
-  if (BIO && c.bioInit) { // v5.2 细则5：房间宝箱随机开出 1 个当前枪的技能（直接入账）
-    const u = game.rollSkill();
-    if (u) game.grantSkill(u);
-    else for (let i = 0; i < 3; i++) room.pickups.push(new Pickup('coin', c.x + rand(-20, 20), c.y + rand(-10, 10)));
-    room.pickups.push(new Pickup('coin', c.x - 26, c.y + 8));
-    return;
-  }
   const def = randomItem(p);
   const wid = Math.random() < .35 ? pickWeaponId(p) : null;
   if (wid || def) {

@@ -234,9 +234,7 @@ function createRoomContents(room, floorNum, entryX, entryY) {
   }
 
   if (room.type === 'treasure') {
-    if (BIO) { // v5.2 细则5：藏品室直出 1 张当前枪技能卡
-      const u = game.rollSkill();
-      room.pickups.push(u ? new Pickup('skill', WORLD_W / 2, WORLD_H / 2, { u }) : makeRewardPickup(WORLD_W / 2, WORLD_H / 2, game.player));
+    if (BIO) { // v5.2.1：藏品室=清房后开箱选技能（统一 bioInit 宝箱，见下）；此处不再直出
     } else {
       const rp = makeRewardPickup(WORLD_W / 2, WORLD_H / 2, game.player);
       if (rp.kind === 'item' && !rp.item)
@@ -271,14 +269,14 @@ function createRoomContents(room, floorNum, entryX, entryY) {
   }
 
   if (BIO && room.type === 'reward') { // 奖励房：付币开门的富矿，2 宝箱（同初始箱规则）+ 物资堆，无怪
-    const c1 = new Pickup('chest', WORLD_W / 2 - 70, WORLD_H / 2); c1.bioInit = true;
-    const c2 = new Pickup('chest', WORLD_W / 2 + 70, WORLD_H / 2); c2.bioInit = true;
+    const c1 = new Pickup('chest', WORLD_W / 2 - 70, WORLD_H / 2); c1.bioInit = true; c1.tier = 'blue';   // v5.2.2：奖励房=蓝箱+紫箱
+    const c2 = new Pickup('chest', WORLD_W / 2 + 70, WORLD_H / 2); c2.bioInit = true; c2.tier = 'purple';
     room.pickups.push(c1, c2);
     for (let i = 0; i < 3; i++) room.pickups.push(new Pickup('loot', WORLD_W / 2 + rand(-40, 40), WORLD_H / 2 + rand(-70, -40), choice(LOOT)));
     room.pickups.push(new Pickup('save', WORLD_W / 2, WORLD_H / 2 + 110)); // 奖励房必出幸存者
   }
 
-  if (BIO && (room.type === 'normal' || room.type === 'boss' || room.type === 'start')) { // v5.1.1 细则1：进房即有初始宝箱（远离入口、避开怪与BOSS）
+  if (BIO && (room.type === 'normal' || room.type === 'boss' || room.type === 'start' || room.type === 'treasure')) { // v5.2.1：每房一箱（含藏品室）；清房后可开
     let bx = WORLD_W / 2, by = TILE * 3, bd = -1;
     for (let i = 0; i < 60; i++) {
       const x = rand(TILE * 2.2, WORLD_W - TILE * 2.2), y = rand(TILE * 2.2, WORLD_H - TILE * 2.2);
@@ -289,7 +287,10 @@ function createRoomContents(room, floorNum, entryX, entryY) {
       if (d < 130) continue;
       if (d > bd) { bd = d; bx = x; by = y; }
     }
-    const ch = new Pickup('chest', bx, by); ch.bioInit = true; room.pickups.push(ch);
+    const ch = new Pickup('chest', bx, by); ch.bioInit = true;
+    ch.tier = room.type === 'boss' ? 'purple' : room.type === 'treasure' ? 'blue' : room.type === 'start' ? 'wood'
+      : (Math.random() < .05 ? 'purple' : Math.random() < .3 ? 'blue' : 'wood'); // v5.2.2：箱色=掉落表品质
+    room.pickups.push(ch);
   }
 
   // v4.0 撤离点：桌面每层起点房都有；v5.0 搜打撤：起点房不许白嫖，每 3 间实验室布一个撤离点

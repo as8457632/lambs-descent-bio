@@ -128,7 +128,7 @@ function newRun(stage = 1, floor = 1) { // floor>1：死亡续爬（从倒下那
   p.speed += .15 * m.up.spd;
   p.dashCdMax = Math.max(24, p.dashCdMax - 10 * m.up.dash);
   game.reviveAvail = m.up.revive > 0;
-  game.runCoins = 0; game.runEarned = 0; game.levelUps = 0; game.pendingLevelUps = 0; game.levelChoices = null; game.settled = false;
+  game.runCoins = 0; game.runEarned = 0; game.levelUps = 0; game.levelChoices = null; game.settled = false; game.wcheck = null;
   game.bag = []; game.saved = 0; game.roomNum = 1; game.extractMode = false; game.bossKilled = false; game.matCarry = { iron: 0, core: 0 }; // v5.0 搜打撤：背包/救人/深度 + v5.1 随身材料
   if (BIO) { game.runCoins = 3 * m.up.coin; game.runEarned = 3 * m.up.coin; } else p.coins += 3 * m.up.coin; // 开运之手（BIO 计入随身，重置后加）
   Touch.sticks.move = Touch.sticks.aim = null;
@@ -140,24 +140,13 @@ function newRun(stage = 1, floor = 1) { // floor>1：死亡续爬（从倒下那
   BGM.start();
 }
 
-// ── 升级三选一 ──
-game.gainXp = function (n) {
-  const p = game.player;
-  if (BIO && p.upLv && p.upLv.siphon) n = Math.ceil(n * 1.25); // 紫卡：经验虹吸
-  p.xp += n;
-  while (p.xp >= p.xpNext) {
-    p.xp -= p.xpNext; p.level++;
-    p.xpNext = 6 + p.level * 5;
-    game.pendingLevelUps++;
-  }
-  if (game.pendingLevelUps > 0 && game.state === 'play') game.openLevelUp();
-};
-game.openLevelUp = function () {
+// ── v5.2.1 开箱选技能（制作人口径：杀怪不给经验；技能=清房开箱，池=当前所持枪）──
+game.openChestChoice = function () {
   const p = game.player;
   const avail = u => p.gunLvOf(u) < u.max;
   const picks = [];
-  const n = BIO ? (p.level % 4 === 0 ? 4 : 3) : 3; // 文档 4.1：每次呈现 3-4 个
-  if (BIO) { // v5.2 细则5：卡源=当前枪池 70% + 通用池 30%，品质加权保留
+  const n = Math.random() < .5 ? 3 : 4; // 文档 4.1：每次呈现 3-4 个
+  if (BIO) { // v5.2.1：卡源=当前枪池 70% + 通用池 30%，品质加权保留
     const gunPool = () => UPGRADES.filter(u => u.gun === p.weapon.id && avail(u) && !picks.includes(u));
     const genPool = () => UPGRADES.filter(u => !u.gun && avail(u) && !picks.includes(u));
     for (let i = 0; i < n; i++) {
@@ -174,21 +163,44 @@ game.openLevelUp = function () {
     for (let i = 0; i < n && bag.length; i++) picks.push(bag.splice(Math.floor(Math.random() * bag.length), 1)[0]);
   }
   game.levelChoices = picks.length ? picks : null;
-  if (!game.levelChoices) { game.pendingLevelUps = 0; return; }
+  if (!game.levelChoices) { game.runCoins += 5; game.runEarned += 5; game.toast = { item: { name: '宝箱：技能已满', desc: '全卡池满级，折算 5 金币', color: '#e8c85e' }, t: 160 }; return; }
   game.state = 'levelup';
   SFX.play('item');
 };
-game.rollSkill = function () { // v5.2 细则5：宝箱/藏品室的技能=当前枪卡池，枪池枯竭回退通用池
+// v5.2.2 宝箱掉落（参考原作）：箱色决定件数与掉落表，一次爆出多件（金币成串/武器带光柱/技能走三选一）
+game.openChestLoot = function (room, c) {
+  c.dead = true;
+  SFX.play('clear');
+  spawnParticles(room, c.x, c.y, 16, '#e8c85e', 3.2);
   const p = game.player;
-  let bag = UPGRADES.filter(u => u.gun === p.weapon.id && p.gunLvOf(u) < u.max);
-  if (!bag.length) bag = UPGRADES.filter(u => !u.gun && p.gunLvOf(u) < u.max);
-  return bag.length ? choice(bag) : null;
+  const CFG = {
+    wood:   { n: randi(1, 2), coins: [4, 9],  weapon: .05, skill: .35, medkit: .35, mat: .25, col: '#c8a06a' },
+    blue:   { n: randi(2, 3), coins: [8, 15], weapon: .15, skill: .55, medkit: .45, mat: .40, col: '#7fb2e8' },
+    purple: { n: randi(3, 4), coins: [12, 22], weapon: .35, skill: .75, medkit: .50, mat: .60, col: '#b093e8' },
+  }[c.tier || 'wood'];
+  let gotSkill = false, weapons = 0, spawned = 0;
+  const drop = o => { o.x = c.x + rand(-34, 34); o.y = c.y + rand(-8, 26); room.pickups.push(o); spawned++; };
+  for (let i = 0; i < CFG.n; i++) {
+    const r = Math.random();
+    if (r < CFG.weapon && weapons < 2) { // 开箱出武器：账号拥有池随机（参考原作紫光柱）
+      const wid = pickWeaponId(p) || bioAnyOwnedWeapon();
+      if (wid) { weapons++; const wp = new Pickup('weapon', 0, 0, null, 0, wid); drop(wp); game.fx.push({ type: 'dropbeam', x: wp.x, y: wp.y + 6, col: WEAPONS[wid].c, t: 90, t0: 90 }); }
+      else for (let k = 0; k < 3; k++) drop(new Pickup('coin', 0, 0));
+    } else if (r < CFG.weapon + CFG.skill && !gotSkill) { gotSkill = true; } // 技能位：开完箱进三/四选一
+    else if (r < CFG.weapon + CFG.skill + CFG.medkit) drop(new Pickup('medkit', 0, 0));
+    else if (r < CFG.weapon + CFG.skill + CFG.medkit + CFG.mat) drop(new Pickup('mat', 0, 0, CRAFT_MATS[Math.random() < .6 ? 'iron' : 'core']));
+    else for (let k = 0, cc = randi(CFG.coins[0], CFG.coins[1]); k < Math.min(cc, 10); k++) drop(new Pickup('coin', 0, 0)); // 金币成串喷出
+  }
+  if (spawned === 0 && !gotSkill) for (let k = 0; k < 4; k++) drop(new Pickup('coin', 0, 0)); // 空箱保底
+  if (gotSkill) game.openChestChoice(); // 技能=当前枪池三/四选一
+  else game.toast = { item: { name: c.tier === 'purple' ? '紫箱开启！' : c.tier === 'blue' ? '蓝箱开启' : '宝箱开启', desc: '战利品已散落在地，去捡！', color: CFG.col }, t: 150 };
 };
-game.grantSkill = function (u) {
-  game.applyUpgrade(u);
-  const gname = u.gun ? WEAPONS[u.gun].name : '通用';
-  game.toast = { item: { name: `获得技能：${u.name}`, desc: `${u.desc} —— 隶属 ${gname}`, color: u.rar === 'SSR' ? '#b093e8' : u.rar === 'SR' ? '#7fb2e8' : '#7fae5a' }, t: 190 }; // v5.2 门禁P1：toast 边框用品质色
-  SFX.play('item');
+game.resolveWcheck = function (equip) { // v5.2.2 武器详情卡：装备 / 不换
+  const wc = game.wcheck; game.wcheck = null; game.state = 'play';
+  Touch.tapped = false; Touch.menuTap = null;
+  if (!wc || !wc.pk || wc.pk.dead) return;
+  if (equip) wc.pk.takeWeapon(game.player);
+  else { wc.pk.denyCd = 150; game.hint = { text: '已跳过，武器留在地上（走近可再选）', t: 100 }; }
 };
 game.applyUpgrade = function (u) { // v5.2：通用卡即时 apply；枪卡入 gunLv（切枪仍保留，只在持该枪时生效）
   const p = game.player;
@@ -203,10 +215,8 @@ game.pickUpgrade = function (i) {
   game.applyUpgrade(u);
   game.levelUps++;
   game.toast = { item: { name: u.name, desc: u.desc, color: u.c }, t: 140 };
-  game.pendingLevelUps--;
   game.levelChoices = null;
-  if (game.pendingLevelUps > 0) game.openLevelUp();
-  else game.state = 'play';
+  game.state = 'play';
 };
 
 function loadFloor(n) {
@@ -370,6 +380,15 @@ function update() {
       for (let i = 0; i < zones.length; i++)
         if (inZone(mt, zones[i])) { game.pickUpgrade(i); break; }
     }
+    return;
+  }
+  if (game.state === 'wcheck') { // v5.2.2 武器详情卡：1/Enter=装备，2/Esc=不换
+    let pick = -1;
+    if (Input.pressed('Digit1') || Input.pressed('Enter')) pick = 0;
+    if (Input.pressed('Digit2') || Input.pressed('Escape')) pick = 1;
+    const mt = Touch.menuTap; Touch.menuTap = null;
+    if (mt) { const z = wcheckZones(); for (let i = 0; i < z.length; i++) if (inZone(mt, z[i])) pick = i; }
+    if (pick >= 0) game.resolveWcheck(pick === 0);
     return;
   }
   if (game.state === 'workshop') {
@@ -567,7 +586,6 @@ function onRoomCleared(room) {
   SFX.play('clear');
   if (room.boss) {
     room.boss = null; room.hasEnemiesPlanned = false;
-    game.gainXp(30 + 10 * game.floorNum);
     game.runCoins += 40 + 20 * game.floorNum; game.runEarned += 40 + 20 * game.floorNum; if (!BIO) Meta.add(40 + 20 * game.floorNum); // BIO 走撤离入账，防双付
     const mt = Meta.load(); // 新手保护：生涯首杀 Boss 送 1 张军械券（军械库免费单抽，防开局只有制式枪无聊）
     if (!mt.ticketGiven) {
@@ -756,7 +774,7 @@ function draw() {
   for (const pk of game.cur.pickups) if (!pk.dead) drawPickup(cx, pk, game.time);
   for (const e of game.cur.enemies) drawEnemy(cx, e, game.time);
   if (game.cur.boss && !game.cur.boss.dead) drawBoss(cx, game.cur.boss, game.time);
-  if (!(game.state === 'dead' || game.state === 'win')) drawPlayer(cx, game.player, game.time);
+  if (!(game.state === 'dead' || game.state === 'win')) { drawPlayer(cx, game.player, game.time); drawHeadHud(cx, game.player, game.time); } // v5.2.2 头顶血条+弹丸
   for (const tr of game.cur.tears) drawTear(cx, tr, game.time);
   drawFx(cx, game);
   for (const q of game.particles) {
@@ -837,6 +855,7 @@ function draw() {
   }
   if (BIO && game.state === 'play' && game.bagOpen) drawBagPanel(cx, game);
   if (game.state === 'levelup') drawLevelUp(cx, game);
+  if (game.state === 'wcheck') drawWeaponCheck(cx, game);
   if (game.state === 'play' && game.mapOpen) drawFloorMap(cx, game);
 
   // 受击红闪
