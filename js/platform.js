@@ -9,9 +9,24 @@ function mergeMax(a, b) { // 逐键取大的合并（离线积压快照合并 / 
   for (const k of Object.keys(b || {})) o[k] = Math.max(+o[k] || 0, +b[k] || 0);
   return o;
 }
+// ── 云存档后端地址解析（v5.3 登录接线）──
+// 生产 API 域（nginx 反代 → 内网 28989，TLS 在 nginx 终结）
+const PROD_API = 'https://lambs.znseed.top';
+// 优先级：URL ?api= > 手动设置(localStorage) > 按页面协议推断 > 纯本地
+//   http:  → 同源（局域网 lan.js 一体化调试：静态 + /api 反代在同一端口，无需跨域）
+//   https: → 生产 API 域（游戏静态托管在 Pages/EdgeOne，与 API 不同源，必须显式指过去）
+//   file:  → 空（纯本地存档，不联网）
+// 旧实现直接取 location.origin，导致游戏一上 https 就去请求"游戏自己的域/api/login"→404→静默退回本地档
+function resolveApi(protocol, origin, search, stored) {
+  const q = (search.match(/[?&]api=([^&]+)/) || [])[1];
+  if (q) return decodeURIComponent(q).replace(/\/+$/, '');
+  if (stored) return stored.replace(/\/+$/, '');
+  if (protocol === 'file:') return '';
+  if (protocol === 'http:') return origin; // 局域网/本机 http：同源直连
+  return PROD_API;
+}
 const CloudSave = {
-  api: (location.search.match(/api=([^&]+)/) || [])[1] || localStorage.getItem('tr_api') ||
-       (/^http/.test(location.origin) ? location.origin : ''), // file://(origin=null)与公网 https 默认纯本地档；LAN http 部署自动同源
+  api: resolveApi(location.protocol, location.origin, location.search, localStorage.getItem('tr_api')),
   token: localStorage.getItem('tr_token') || null,
   profile: null,
   online: false,
