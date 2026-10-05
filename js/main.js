@@ -18,7 +18,7 @@ const game = {
 function shake(n) { game.shakeAmt = Math.max(game.shakeAmt, n); }
 
 let cv, cx;
-const BUILD = 'v5.3-bio'; // 版本号水印：bio-mode 分支（生化地下城复刻）
+const BUILD = 'v5.3.1-bio'; // 版本号水印：bio-mode 分支；5.3.1 = 修掉 touchstart 读不存在的 pbtn/mbtn/gbtn 抛异常（摇杆与所有按钮全失效）
 window.__BUILD = BUILD;
 window.DBG_VP = () => ({ build: BUILD, inner: [innerWidth, innerHeight], vv: window.visualViewport ? [Math.round(visualViewport.width), Math.round(visualViewport.height)] : null, dpr: devicePixelRatio, css: [Math.round(cv ? cv.getBoundingClientRect().width : 0), Math.round(cv ? cv.getBoundingClientRect().height : 0)] });
 
@@ -361,10 +361,8 @@ function update() {
     const onDiffPill = (() => { if (!BIO || !mt) return false; const dz = bioDiffZones(); const di = dz.findIndex(z => inZone(mt, z)); if (di < 0) return false; Meta.load().bioDiff = di; Meta.save(); SFX.play('coin'); Touch.tapped = false; return true; })();
     const onStageBtn = mt && (inZone(mt, sb.l) || inZone(mt, sb.r));
     const onCharCard = (() => { const h = charZoneHit(mt); return h && CHARS.some((_, i) => inZone(h, charZones()[i])); })();
-    if (mt && inZone(mt, accountZone())) {
-      const n = (typeof prompt === 'function' ? prompt('输入新昵称（≤12字）', m.nickname || '') : null);
-      if (n && n.trim()) { m.nickname = n.trim().slice(0, 12); Meta.save(); if (CloudSave.token) CloudSave.queue(); }
-      Touch.tapped = false; return;
+    if (mt && inZone(mt, accountZone())) { // 右上账号条 → 进账号面板（昵称改在面板 'nick' 行改，不再在这里弹 prompt）
+      game.state = 'account'; game.acctTab = 'main'; SFX.play('coin'); Touch.tapped = false; return;
     }
     if (Input.pressed('Enter')) newRun(game.selStage);
     else if (Input.pressed('KeyS')) { game.workshopFrom = 'title'; game.state = 'workshop'; }

@@ -257,7 +257,6 @@ const Touch = {
   },
   init(cv) {
     this.layoutButtons();
-    const { pbtn, mbtn, gbtn } = this; // 右侧竖排小按钮不随布局换位，可安全捕获
     const pts = e => {
       const r = cv.getBoundingClientRect();
       // v5.2 强制竖屏：rot 逆变换已删（不存在横屏旋转态）
@@ -274,13 +273,17 @@ const Touch = {
         return;
       }
       for (const p of pts(e)) {
-        if (game.state === 'play' && Math.hypot(p.x - gbtn.x, p.y - gbtn.y) < gbtn.r + 8) { this.mapTap = true; continue; } // 仅战斗态响应，防跨态幻影开图
+        // v5.3 修复：布局抽成 layoutButtons() 后字段名是 mapBtn/pauseBtn/muteBtn，
+        // 旧代码仍在解构 pbtn/mbtn/gbtn（不存在）→ gbtn.x 每次 touchstart 抛异常，摇杆永远生不出来
+        const gb = this.mapBtn;
+        if (game.state === 'play' && Math.hypot(p.x - gb.x, p.y - gb.y) < gb.r + 8) { this.mapTap = true; continue; } // 仅战斗态响应，防跨态幻影开图
         { const mz = minimapZone(); // 点小地图开全图（BIO 左上 / 手机右上 / 桌面侧栏）
           const my0 = BIO ? mz.y - 6 : mz.y, mw = BIO ? 132 : mz.w + 14;
           if (game.state === 'play' && (IS_MOBILE || BIO) && p.x >= mz.x - 6 && p.x <= mz.x + mw && p.y >= my0 - 4 && p.y <= my0 + (BIO ? 40 : mz.h + 12)) { this.mapTap = true; continue; } }
         if (game.state === 'play') this.startedInPlay.add(p.id); // 战斗中按下的手指，抬起时不得触发菜单确认
-        if (Math.hypot(p.x - pbtn.x, p.y - pbtn.y) < pbtn.r + 8) { this.pauseTap = true; continue; }
-        if (Math.hypot(p.x - mbtn.x, p.y - mbtn.y) < mbtn.r + 8) { this.muteTap = true; continue; }
+        const pb = this.pauseBtn, mb = this.muteBtn;
+        if (Math.hypot(p.x - pb.x, p.y - pb.y) < pb.r + 8) { this.pauseTap = true; continue; }
+        if (Math.hypot(p.x - mb.x, p.y - mb.y) < mb.r + 8) { this.muteTap = true; continue; }
         if (game.state === 'play' && this.bagBtn && Math.hypot(p.x - this.bagBtn.x, p.y - this.bagBtn.y) < this.bagBtn.r + 8) { this.bagTap = true; continue; } // 背包
         let hitSkill = false;
         if (game.state === 'play') for (let i = 0; i < this.skillBtns.length; i++) { // v5.0 主动技能：未解锁的按钮不吞触点
